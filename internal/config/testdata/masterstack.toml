@@ -1,0 +1,22 @@
+# MasterStack configuration for testing
+[tilekeeper]
+defaultLayout = "MasterStack"
+debug = false
+masterWidth = 60
+stackLayout = "splitv"
+stackSide = "right"
+visibleStackLimit = 3
+
+[workspace.1]
+defaultLayout = "MasterStack"
+masterWidth = 55
+stackLayout = "splitv"
+stackSide = "right"
+
+[workspace.2]
+defaultLayout = "Grid"
+
+[workspace."coding"]
+defaultLayout = "MasterStack"
+masterWidth = 70
+stackLayout = "tabbed"

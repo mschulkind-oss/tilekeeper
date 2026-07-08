@@ -1,0 +1,23 @@
+# A representative real-world user config.
+[tilekeeper]
+defaultLayout = "none"
+masterWidth = 75
+debug = true
+visibleStackLimit = 3
+
+[workspace.4]
+defaultLayout = "MasterStack"
+stackSide = "left"
+
+[workspace.6]
+defaultLayout = "MasterStack"
+
+[workspace.7]
+defaultLayout = "MasterStack"
+
+[workspace.8]
+defaultLayout = "tabbed"
+
+[workspace.9]
+defaultLayout = "MasterStack"
+stackSide = "left"

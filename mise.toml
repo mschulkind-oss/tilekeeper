@@ -1,0 +1,7 @@
+[tools]
+go = "1.26.2"
+just = "latest"
+"go:honnef.co/go/tools/cmd/staticcheck" = "latest"
+
+[env]
+_.file = ".env"

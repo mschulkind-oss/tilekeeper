@@ -1,0 +1,4 @@
+# Minimal configuration for testing
+[tilekeeper]
+debug = false
+defaultLayout = "none"
