@@ -237,16 +237,44 @@ func checkConfig() (bool, string) {
 	return false, "no config.toml found in ~/.config/tilekeeper/"
 }
 
+// installedBinaryPath returns the stable install location of the tilekeeper
+// binary ($GOBIN/tilekeeper, else ~/.local/bin/tilekeeper) if a regular file
+// exists there, or "" otherwise. This is where `just install` places it, and
+// where the systemd unit's ExecStart should point so restarts survive the repo
+// being moved, renamed, or rebuilt.
+func installedBinaryPath() string {
+	var dir string
+	if g := os.Getenv("GOBIN"); g != "" {
+		dir = g
+	} else if h := os.Getenv("HOME"); h != "" {
+		dir = filepath.Join(h, ".local", "bin")
+	} else {
+		return ""
+	}
+	p := filepath.Join(dir, "tilekeeper")
+	if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+		return p
+	}
+	return ""
+}
+
 func runInstallService() {
-	// Find our own executable
-	exePath, err := os.Executable()
-	if err != nil {
-		// Fall back to looking in PATH
-		exePath, err = exec.LookPath("tilekeeper")
+	// Prefer the stable install location ($GOBIN or ~/.local/bin, where
+	// `just install` places the binary) for the unit's ExecStart. Using the
+	// running executable would bake in a throwaway build path like
+	// <repo>/bin/tilekeeper — which breaks the service the moment the repo is
+	// moved, renamed, or `just clean`ed.
+	exePath := installedBinaryPath()
+	if exePath == "" {
+		var err error
+		exePath, err = os.Executable()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Could not find tilekeeper executable.")
-			fmt.Fprintln(os.Stderr, "Install it first with: just install")
-			os.Exit(1)
+			exePath, err = exec.LookPath("tilekeeper")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Could not find tilekeeper executable.")
+				fmt.Fprintln(os.Stderr, "Install it first with: just install")
+				os.Exit(1)
+			}
 		}
 	}
 	// Resolve symlinks to get the real path
