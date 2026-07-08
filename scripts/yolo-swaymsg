@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""yolo-swaymsg — Run read-only swaymsg queries on the host from inside the jail.
+
+Usage:
+    yolo-swaymsg [-t TYPE] [-r] [--raw]
+    yolo-swaymsg subscribe EVENT[,EVENT...] [--seconds N]
+
+Flags intentionally mirror swaymsg where they make sense. Only read-only
+message types are allowed on the host side; anything that could mutate sway
+state (run_command, etc.) is rejected before it ever reaches swaymsg.
+
+Examples:
+    yolo-swaymsg -t get_tree
+    yolo-swaymsg -t get_workspaces
+    yolo-swaymsg -t get_outputs
+    yolo-swaymsg -t get_version
+    yolo-swaymsg subscribe window,binding --seconds 10
+"""
+import argparse
+import json
+import os
+import socket
+import struct
+import sys
+
+DEFAULT_SOCKET = "/run/yolo-services/swaymsg.sock"
+SOCKET_PATH = os.environ.get("YOLO_SERVICE_SWAYMSG_SOCKET", DEFAULT_SOCKET)
+
+FRAME_STDOUT = 1
+FRAME_STDERR = 2
+FRAME_EXIT = 3
+
+READ_ONLY_TYPES = (
+    "get_workspaces", "get_tree", "get_outputs", "get_marks",
+    "get_bar_config", "get_version", "get_binding_modes", "get_config",
+    "get_seats", "get_inputs", "get_binding_state",
+)
+
+SUBSCRIBE_EVENTS = (
+    "workspace", "mode", "window", "barconfig_update", "binding",
+    "shutdown", "tick", "bar_state_update", "input",
+)
+
+
+def _read_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return bytes(buf)
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _send_and_stream(request: dict) -> int:
+    if not os.path.exists(SOCKET_PATH):
+        sys.stderr.write(
+            "yolo-swaymsg: host sway bridge is not available.\n"
+            f"  expected socket: {SOCKET_PATH}\n"
+            "  enable it by adding a `host_services.swaymsg` entry in\n"
+            "  yolo-jail.jsonc (see scripts/yolo-swaymsg-service.py header\n"
+            "  for the snippet), then restart the jail.\n"
+        )
+        return 1
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(SOCKET_PATH)
+    except OSError as e:
+        sys.stderr.write(f"yolo-swaymsg: connect failed: {e}\n")
+        return 1
+
+    try:
+        sock.sendall((json.dumps(request) + "\n").encode())
+        exit_code = 1
+        while True:
+            header = _read_exact(sock, 5)
+            if len(header) < 5:
+                break
+            stream, length = struct.unpack(">BI", header)
+            payload = _read_exact(sock, length)
+            if len(payload) < length:
+                break
+            if stream == FRAME_STDOUT:
+                sys.stdout.buffer.write(payload)
+                sys.stdout.flush()
+            elif stream == FRAME_STDERR:
+                sys.stderr.buffer.write(payload)
+                sys.stderr.flush()
+            elif stream == FRAME_EXIT:
+                if len(payload) == 4:
+                    (exit_code,) = struct.unpack(">i", payload)
+                break
+        return exit_code
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _parse_events(spec: str) -> list:
+    events = [e.strip() for e in spec.split(",") if e.strip()]
+    bad = [e for e in events if e not in SUBSCRIBE_EVENTS]
+    if bad:
+        sys.stderr.write(
+            f"yolo-swaymsg: unknown subscribe event(s): {', '.join(bad)}\n"
+            f"  valid events: {', '.join(SUBSCRIBE_EVENTS)}\n"
+        )
+        sys.exit(2)
+    if not events:
+        sys.stderr.write("yolo-swaymsg: no events specified\n")
+        sys.exit(2)
+    return events
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # subscribe is a subcommand, not a -t type, so peel it off first.
+    if argv and argv[0] == "subscribe":
+        ap = argparse.ArgumentParser(prog="yolo-swaymsg subscribe")
+        ap.add_argument("events", help="comma-separated event names, e.g. window,binding")
+        ap.add_argument("--seconds", "-s", type=int, default=10,
+                        help="stop after N seconds (default 10, server caps at 120)")
+        args = ap.parse_args(argv[1:])
+        return _send_and_stream({
+            "type": "subscribe",
+            "events": _parse_events(args.events),
+            "seconds": args.seconds,
+        })
+
+    # Plain query mode. Accept swaymsg's -t and -r flags; -r is the only
+    # default anyway on the server side (we always pass -r to swaymsg).
+    ap = argparse.ArgumentParser(
+        prog="yolo-swaymsg",
+        description="Read-only swaymsg bridge from jail to host.",
+    )
+    ap.add_argument("-t", "--type", default="get_tree",
+                    help=f"sway IPC message type (default: get_tree). "
+                         f"Must be one of: {', '.join(READ_ONLY_TYPES)}")
+    ap.add_argument("-r", "--raw", action="store_true",
+                    help="accepted for swaymsg compatibility; server always "
+                         "returns raw JSON")
+    ap.add_argument("--list-types", action="store_true",
+                    help="list allowed read-only types and exit")
+    args = ap.parse_args(argv)
+
+    if args.list_types:
+        print("Allowed -t types:")
+        for t in READ_ONLY_TYPES:
+            print(f"  {t}")
+        print("\nSubscribe events (via `yolo-swaymsg subscribe`):")
+        for e in SUBSCRIBE_EVENTS:
+            print(f"  {e}")
+        return 0
+
+    if args.type not in READ_ONLY_TYPES:
+        sys.stderr.write(
+            f"yolo-swaymsg: type {args.type!r} is not in the read-only allowlist.\n"
+            f"  run `yolo-swaymsg --list-types` to see allowed types.\n"
+            "  mutating commands (e.g. run_command) are intentionally unavailable.\n"
+        )
+        return 2
+
+    return _send_and_stream({"type": args.type})
+
+
+if __name__ == "__main__":
+    sys.exit(main())

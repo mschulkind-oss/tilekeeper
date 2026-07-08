@@ -1,0 +1,30 @@
+# Public files for open-source release
+# Everything listed here gets pushed to the public repo
+
+# Source code
+cmd/
+internal/
+
+# Config & build
+go.mod
+go.sum
+justfile
+mise.toml
+.gitignore
+
+# Community
+README.md
+LICENSE
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+
+# Documentation
+docs/design/
+docs/guides/
+
+# CI
+.github/
+
+# Examples
+example_sway_config

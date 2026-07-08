@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      # Installs the toolchain pinned in mise.toml (go, just, staticcheck),
+      # then runs the read-only gate: gofmt check, vet, staticcheck, tests, fuzz-gate.
+      - run: just check-ci

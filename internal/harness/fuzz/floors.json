@@ -1,0 +1,27 @@
+{
+  "_comment": "Per-invariant violation FLOORS for the reference sweep (ReferenceConfig: seeds 1..60 x 2000 steps x MaxWindows 12, DefaultConfig otherwise). cmd/fuzz-gate fails CI if any invariant EXCEEDS its floor, or if a brand-new invariant class (not listed here) appears. Floors are the CURRENT measured value so the gate is green now; each non-zero floor carries a justification so a reviewer can drive it down. Triage categories: (clean)=zero, genuine residual=0; (sim)=sim-model limitation artifact; (gen)=aggressive-generator artifact; (prod)=open production bug awaiting a fix. Update procedure: run `go run ./cmd/fuzz-gate -update` to regenerate, then justify any change in review.",
+  "floors": {
+    "no-crash": 0,
+    "no-invalid-cmd": 0,
+    "no-sway-reject": 0,
+    "focus-convergence": 0,
+    "no-handler-error": 0,
+    "master-width-honored": 0,
+    "no-wrapper-chain": 394,
+    "tracked-matches-leaves": 38331,
+    "master-width-degenerate": 125,
+    "master-stack-split": 12955
+  },
+  "justifications": {
+    "no-crash": "(clean) HandleEvent never panics. Floor 0 — any panic is a real bug.",
+    "no-invalid-cmd": "(clean) sim never records an unsupported command. Floor 0.",
+    "no-sway-reject": "(clean) sim never records a command real sway would refuse. Floor 0.",
+    "focus-convergence": "(clean) at most one focused leaf after any step. Floor 0.",
+    "no-handler-error": "(clean) no layout manager returns an Error-level failure. Floor 0.",
+    "master-width-honored": "(clean) REAL-bug class after the deliverable-1 split: master width is only checked when the layout structure is HEALTHY (master does NOT share its parent with a stack window). Floor 0 — a master-width regression (e.g. reverting 6ae4d4a's stale-rect snapshot) drives this NON-ZERO (measured: 8 over this reference config). This is the gate's primary master-width signal.",
+    "no-wrapper-chain": "(sim) Persistent singleton-wrapper chains. Dominated by MasterStack not always flattening chaotic foreign trees the aggressive genContainerWorkspaceMove generator builds; cumulative-with-persistence so one bad state recounts every step. Distinct bad states are far fewer. Drive down by improving flatten coverage on foreign nested trees.",
+    "tracked-matches-leaves": "(sim+gen) Manager tracking vs sim leaf set. Dominated by (a) sim moveDir cannot cross container boundaries (master_stack_split_test.go:106-111) and (b) genContainerWorkspaceMove moving whole workspaces repeatedly, stranding fellow-traveler leaves. Cumulative-with-persistence. Largest residual; the distinct-state count is small.",
+    "master-width-degenerate": "(sim+gen) FALSE-POSITIVE class split off from master-width-honored: the master shares its parent with stack windows, i.e. the stack column is already missing (the master-stack-split bug shape), so `resize 75 ppt` is divided across degenerate siblings and the width is meaningless BY CONSTRUCTION. master-stack-split owns the real structural signal. Driving master-stack-split to 0 drives this to 0.",
+    "master-stack-split": "(sim+gen+prod) Master shares its parent with a stack window (stack column missing). Dominated by sim moveDir boundary limitation + aggressive workspace-move generator + the MasterStack-not-flattening-foreign-trees / Tabbed multi-child nesting follow-up. Cumulative-with-persistence. The honest open production residual is small relative to this count."
+  }
+}
