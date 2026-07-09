@@ -88,8 +88,9 @@ uninstall:
 install-service: install
     bin/tilekeeper install-service
 
-# Restart the systemd service (after install)
+# Restart the systemd service, picking up any unit-file changes first
 restart-service:
+    systemctl --user daemon-reload
     systemctl --user restart tilekeeper
 
 # Full rebuild and restart: build, install, restart service
