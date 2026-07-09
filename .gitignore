@@ -46,3 +46,6 @@ trash/*
 
 # Host-local working notes / scripts (not project content)
 /scratch/
+
+# goreleaser output
+/dist/

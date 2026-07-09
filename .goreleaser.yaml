@@ -1,0 +1,47 @@
+# goreleaser — builds Linux release binaries and attaches them (plus checksums)
+# to the GitHub release on tag push. Driven by .github/workflows/release.yml.
+# Local check:  goreleaser check   /   goreleaser build --snapshot --clean
+version: 2
+
+project_name: tilekeeper
+
+builds:
+  - id: tilekeeper
+    main: ./cmd/tilekeeper
+    binary: tilekeeper
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Tag }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.buildTime={{ .Date }}
+      - -X main.treeState=clean
+
+archives:
+  - id: tilekeeper
+    format: tar.gz
+    name_template: "tilekeeper_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - docs/COMMANDS.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^chore:'
+      - '^test:'
+      - '^docs:'
+
+release:
+  github:
+    owner: mschulkind-oss
+    name: tilekeeper
+  prerelease: auto
