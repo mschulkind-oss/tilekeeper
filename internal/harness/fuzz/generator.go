@@ -325,19 +325,29 @@ func (st *fuzzState) genFocus(rng *rand.Rand, ws *sway.Node) sway.Event {
 // reach a real handler — the fuzzer's no-invalid-cmd / no-sway-reject
 // invariants assert that holds across random sequences.
 //
-// INCOMPLETE, and not by choice: `focus left` / `focus right` ARE bound in
-// the live config ($mod+y / $mod+o) but are missing here, so horizontal
-// focus is never fuzzed. Adding them is blocked on the gate's floors being
-// RNG-brittle — bindingCorpus is indexed by rng.IntN(len(bindingCorpus)), so
-// changing its LENGTH reshuffles every seed's walk into different states and
-// surfaces pre-existing bugs as phantom regressions (master-width-honored
-// 0→8, no-wrapper-chain 394→518, master-stack-split +201). Verified 2026-07-16
-// to be reshuffle, not new coverage: substituting two DUPLICATE entries
-// (identical length change, zero new behavior) reproduces the same deltas.
-// Absorbing that via `-update` would raise master-width-honored off its 0
-// floor and blind the gate's primary master-width signal, so this stays
-// unfixed until the gate can tell a code regression from a re-rolled walk.
-// Do not "fix" this by just appending the verbs — check the gate first.
+// INCOMPLETE: `focus left` / `focus right` ARE bound in the live config
+// ($mod+y / $mod+o) but are missing here, so horizontal focus is never
+// fuzzed. Adding them is a coverage win worth taking — with eyes open about
+// what the gate will report.
+//
+// EDITING THIS LIST RE-ROLLS THE REFERENCE SWEEP. The corpus is indexed by
+// rng.IntN(len(bindingCorpus)), so a different verb firing at one step
+// changes the tree and everything downstream cascades. Measured 2026-07-16:
+// two DUPLICATE entries (zero new behavior) move the residual counts as much
+// as real verbs do, and the deltas run BOTH ways (master-stack-split +201 /
+// no-wrapper-chain +124 but tracked-matches-leaves -945). Position matters
+// too — the same two verbs appended at the END leave master-width-honored at
+// 0, while inserting them mid-list surfaces 8. So the nonzero-floor classes
+// (master-stack-split, no-wrapper-chain, tracked-matches-leaves,
+// master-width-degenerate) are walk-specific noise ratchets: re-baselining
+// them for a deliberate generator change is what `-update` is for.
+//
+// The floor-0 classes are NOT noise. A violation there on ANY walk is a true
+// finding — the fuzzer working, not the dice. Do not raise a floor-0 floor
+// to make a widened corpus green; fix what it found. (The 8 seen above are a
+// real `maximized` state-drift bug, not gate brittleness — see
+// toggleMaximize: the flag is only ever cleared by arrangeWindows, and the
+// toggle early-returns below 2 windows, so it can drift stale.)
 var bindingCorpus = []string{
 	// Window navigation
 	"nop tilekeeper focus down",
