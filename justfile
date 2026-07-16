@@ -122,9 +122,13 @@ install-service: install
     # until it re-reads the directory.
     systemctl --user daemon-reload
     # Idempotent, and what makes `just deploy` work on a fresh machine:
-    # without it the first deploy leaves nothing to start at login.
-    systemctl --user enable tilekeeper >/dev/null
-    echo "Service installed and enabled"
+    # without it the first deploy leaves nothing to start at login. Announce
+    # it only when it actually changes something — deploy runs this every
+    # time, and a line that always prints stops being read.
+    if ! systemctl --user is-enabled --quiet tilekeeper 2>/dev/null; then
+        systemctl --user enable tilekeeper >/dev/null
+        echo "Enabled tilekeeper.service"
+    fi
 
 # Restart the systemd service, picking up any unit-file changes first
 restart-service:

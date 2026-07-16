@@ -321,7 +321,23 @@ RestartSec=3
 WantedBy=graphical-session.target
 `, exePath, envBlock)
 
-	if err := os.WriteFile(servicePath, []byte(serviceContent), 0o644); err != nil {
+	switch planServiceWrite(servicePath, serviceContent) {
+	case serviceUpToDate:
+		fmt.Printf("systemd service already up to date: %s\n", servicePath)
+		return
+	case serviceUpdated:
+		if err := writeServiceUnit(servicePath, serviceContent); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write %s: %v\n", servicePath, err)
+			os.Exit(1)
+		}
+		// The caller already has it enabled, so the enable/start recital
+		// would be noise — but a changed unit does need a reload to take.
+		fmt.Printf("Updated systemd service: %s\n", servicePath)
+		fmt.Println("  systemctl --user daemon-reload && systemctl --user restart tilekeeper")
+		return
+	}
+
+	if err := writeServiceUnit(servicePath, serviceContent); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write %s: %v\n", servicePath, err)
 		os.Exit(1)
 	}
@@ -334,4 +350,36 @@ WantedBy=graphical-session.target
 	fmt.Println("  systemctl --user start tilekeeper")
 	fmt.Println()
 	fmt.Println("Or use: just deploy")
+}
+
+// serviceAction is what install-service should do with the unit on disk.
+type serviceAction int
+
+const (
+	serviceUpToDate serviceAction = iota // identical content already there
+	serviceUpdated                       // present but stale
+	serviceCreated                       // absent (or unreadable)
+)
+
+// planServiceWrite decides whether the unit at path needs writing, given the
+// content install-service wants there. Split out from the writing and the
+// printing so `just deploy` staying quiet on a no-op is a tested property
+// rather than a manual observation.
+//
+// An unreadable-but-present file counts as serviceCreated: the write either
+// fixes it or fails loudly, and either beats reporting "up to date" about a
+// file we could not read.
+func planServiceWrite(path, content string) serviceAction {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return serviceCreated
+	}
+	if string(existing) == content {
+		return serviceUpToDate
+	}
+	return serviceUpdated
+}
+
+func writeServiceUnit(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o644)
 }

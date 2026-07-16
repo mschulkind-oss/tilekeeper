@@ -67,6 +67,11 @@ exec tilekeeper daemon
 bindsym $mod+Return       nop tilekeeper swap-master
 bindsym $mod+j            nop tilekeeper focus down
 bindsym $mod+k            nop tilekeeper focus up
+# Route horizontal focus through tilekeeper too, or focus into the stack
+# lands on sway's last-focused window instead of the top (breaking the
+# swap-master alt-tab cycle).
+bindsym $mod+y            nop tilekeeper focus left
+bindsym $mod+o            nop tilekeeper focus right
 bindsym $mod+Shift+j      nop tilekeeper move down
 bindsym $mod+h            nop tilekeeper master shrink
 bindsym $mod+l            nop tilekeeper master grow

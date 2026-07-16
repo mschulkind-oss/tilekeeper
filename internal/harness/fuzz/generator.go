@@ -320,10 +320,24 @@ func (st *fuzzState) genFocus(rng *rand.Rand, ws *sway.Node) sway.Event {
 	return sway.Event{Type: "window", Change: "focus", Container: leaf.Snapshot()}
 }
 
-// bindingCorpus mirrors every `nop tilekeeper ...` verb the user has bound
-// in their sway config. Each entry must round-trip through ParseNopCommand
-// and reach a real handler — the fuzzer's no-invalid-cmd / no-sway-reject
+// bindingCorpus mirrors the `nop tilekeeper ...` verbs the user has bound in
+// their sway config. Each entry must round-trip through ParseNopCommand and
+// reach a real handler — the fuzzer's no-invalid-cmd / no-sway-reject
 // invariants assert that holds across random sequences.
+//
+// INCOMPLETE, and not by choice: `focus left` / `focus right` ARE bound in
+// the live config ($mod+y / $mod+o) but are missing here, so horizontal
+// focus is never fuzzed. Adding them is blocked on the gate's floors being
+// RNG-brittle — bindingCorpus is indexed by rng.IntN(len(bindingCorpus)), so
+// changing its LENGTH reshuffles every seed's walk into different states and
+// surfaces pre-existing bugs as phantom regressions (master-width-honored
+// 0→8, no-wrapper-chain 394→518, master-stack-split +201). Verified 2026-07-16
+// to be reshuffle, not new coverage: substituting two DUPLICATE entries
+// (identical length change, zero new behavior) reproduces the same deltas.
+// Absorbing that via `-update` would raise master-width-honored off its 0
+// floor and blind the gate's primary master-width signal, so this stays
+// unfixed until the gate can tell a code regression from a re-rolled walk.
+// Do not "fix" this by just appending the verbs — check the gate first.
 var bindingCorpus = []string{
 	// Window navigation
 	"nop tilekeeper focus down",

@@ -44,3 +44,37 @@ func TestInstalledBinaryPath(t *testing.T) {
 		t.Errorf("with GOBIN: got %q, want %q", got, gbin)
 	}
 }
+
+// TestPlanServiceWrite pins the "don't repeatedly install the service" fix:
+// `just deploy` runs install-service every time, so an unchanged unit must be
+// a no-op instead of a rewrite plus a wall of setup steps deploy already did.
+func TestPlanServiceWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tilekeeper.service")
+	const content = "[Unit]\nDescription=x\n"
+
+	if got := planServiceWrite(path, content); got != serviceCreated {
+		t.Errorf("absent unit: got %v, want serviceCreated", got)
+	}
+
+	if err := writeServiceUnit(path, content); err != nil {
+		t.Fatal(err)
+	}
+	if got := planServiceWrite(path, content); got != serviceUpToDate {
+		t.Errorf("identical unit: got %v, want serviceUpToDate — a repeat deploy\n"+
+			"must not rewrite the unit", got)
+	}
+
+	if got := planServiceWrite(path, content+"Extra=1\n"); got != serviceUpdated {
+		t.Errorf("stale unit: got %v, want serviceUpdated", got)
+	}
+
+	// The unit template embeds the ExecStart path and the sway env block, so
+	// a changed install location has to be picked up, not skipped as "same".
+	if err := writeServiceUnit(path, "ExecStart=/old/path daemon\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := planServiceWrite(path, "ExecStart=/new/path daemon\n"); got != serviceUpdated {
+		t.Errorf("relocated ExecStart: got %v, want serviceUpdated", got)
+	}
+}
