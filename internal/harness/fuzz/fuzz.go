@@ -745,3 +745,89 @@ func describe(ev sway.Event) string {
 	}
 	return ev.Type + ":" + ev.Change
 }
+
+// checkMaximizedFoldIntact asserts that a manager claiming to be maximized
+// is actually SITTING in the maximized shape: master folded into the stack
+// column (shared parent) with that parent tabbed, exactly what
+// toggleMaximize builds.
+//
+// This exists because `maximized` is an assertion-SUPPRESSION switch that
+// the manager itself owns: both checkMasterWidthHonored and
+// checkMasterStackSplit skip a maximized workspace, since the folded shape
+// legitimately looks like "master shares a parent with the stack" and "the
+// master is not MasterWidth wide". A flag that is stale-true therefore
+// silently disables the gate's two main structural invariants — the bug and
+// its own detector in one. That is how `maximized` state drift stayed
+// invisible for hundreds of steps until an unmaximize replayed the
+// shape-specific restore against a tree that was never folded.
+//
+// So the flag has to justify itself. If the manager says maximized, the
+// fold must be real; otherwise the suppression above is unearned and this
+// fires instead.
+//
+// Skipped below 2 tracked windows: a fold needs two containers to share a
+// parent, and toggleMaximize early-returns there anyway.
+func checkMaximizedFoldIntact(hub *workspace.Hub, s *sim.SimSwayClient, wsNames []string, ev sway.Event, step int, res *Result) {
+	tree, _ := s.GetTree()
+	if tree == nil {
+		return
+	}
+	tree.SetParents()
+	for _, name := range wsNames {
+		mgr := hub.Manager(name)
+		if mgr == nil {
+			continue
+		}
+		ms, ok := mgr.(*layout.MasterStack)
+		if !ok || !ms.Maximized() {
+			continue
+		}
+		ids := ms.WindowIDs()
+		if len(ids) < 2 {
+			continue
+		}
+		var wsNode *sway.Node
+		for _, ws := range tree.Workspaces() {
+			if ws.Name == name {
+				wsNode = ws
+				break
+			}
+		}
+		if wsNode == nil {
+			continue
+		}
+		master := wsNode.FindByID(ids[0])
+		if master == nil || master.Parent == nil {
+			continue
+		}
+		second := wsNode.FindByID(ids[1])
+		if second == nil || second.Parent == nil {
+			continue
+		}
+		if master.Parent != second.Parent {
+			res.Violations = append(res.Violations, Violation{
+				Invariant: "maximized-fold-intact",
+				Step:      step,
+				Event:     ev,
+				Detail: fmt.Sprintf(
+					"workspace=%s claims maximized but master=%d (parent=%d/%s) and stack[0]=%d "+
+						"(parent=%d/%s) are NOT folded together; tracked=%v — stale maximized flag, "+
+						"and it is suppressing master-width/master-stack-split checks",
+					name, ids[0], master.Parent.ID, master.Parent.Layout,
+					ids[1], second.Parent.ID, second.Parent.Layout, ids),
+			})
+			continue
+		}
+		if master.Parent.Layout != "tabbed" {
+			res.Violations = append(res.Violations, Violation{
+				Invariant: "maximized-fold-intact",
+				Step:      step,
+				Event:     ev,
+				Detail: fmt.Sprintf(
+					"workspace=%s claims maximized: master=%d is folded into parent=%d but its layout "+
+						"is %q, want \"tabbed\"; tracked=%v",
+					name, ids[0], master.Parent.ID, master.Parent.Layout, ids),
+			})
+		}
+	}
+}
