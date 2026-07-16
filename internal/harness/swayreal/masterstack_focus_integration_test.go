@@ -219,3 +219,110 @@ func equal(a, b []int64) bool {
 	}
 	return true
 }
+
+// TestIntegrationMaximizeFlagDrift pins the maximized-state-drift fix against
+// real sway: after the fold has been closed away and windows come back,
+// pressing maximize must MAXIMIZE.
+//
+// Before the fix this printed, at each stage:
+//
+//	maximized:        splith(splith(tabbed(leaf leaf leaf)))  maximized=true
+//	closed down to 1: splith(leaf)                            maximized=true   <- stuck
+//	reopened 2:       splith(splith(leaf splitv(leaf leaf)))  maximized=true   <- drifted
+//	pressed maximize: splith(leaf splitv(splitv(leaf leaf)))  maximized=false  <- UN-maximized
+//
+// i.e. the key did the opposite of what it says and left a splitv(splitv(..))
+// chain. toggleMaximize early-returns below 2 windows so it never
+// self-corrects, and only arrangeWindows ever cleared the flag.
+func TestIntegrationMaximizeFlagDrift(t *testing.T) {
+	sw := startSwayOrSkip(t)
+	if err := sw.FocusWorkspace("7"); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := sw.SpawnWindows(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sway.ConnectTo(sw.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	cfg := layout.DefaultMasterStackConfig()
+	cfg.MasterWidth = 75
+	cfg.VisibleStackLimit = 9
+	ms := layout.NewMasterStackManager(conn, cfg)
+	if err := ms.ArrangeAll(wsNode(t, conn, "7")); err != nil {
+		t.Fatal(err)
+	}
+	settle()
+
+	if err := ms.Command("maximize", wsNode(t, conn, "7")); err != nil {
+		t.Fatal(err)
+	}
+	settle()
+	if !ms.Maximized() {
+		t.Fatal("not maximized after the first press")
+	}
+
+	// Close the stack away — the fold cannot exist below 2 windows.
+	for _, id := range ids[1:] {
+		n := wsNode(t, conn, "7").FindByID(id)
+		if n == nil {
+			continue
+		}
+		if err := conn.RunCommand(fmt.Sprintf("[con_id=%d] kill", id)); err != nil {
+			t.Fatal(err)
+		}
+		settle()
+		if err := ms.WindowRemoved(wsNode(t, conn, "7"), n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settle()
+	if ms.Maximized() {
+		t.Fatalf("flag survived the fold: tracked=%v — it now suppresses the "+
+			"master-width and master-stack-split checks", ms.WindowIDs())
+	}
+
+	// Bring windows back and press maximize.
+	newIDs, err := sw.SpawnWindows(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range newIDs {
+		settle()
+		if n := wsNode(t, conn, "7").FindByID(id); n != nil {
+			if err := ms.WindowAdded(wsNode(t, conn, "7"), n); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	settle()
+
+	if err := ms.Command("maximize", wsNode(t, conn, "7")); err != nil {
+		t.Fatal(err)
+	}
+	settle()
+
+	if !ms.Maximized() {
+		t.Errorf("pressing maximize un-maximized instead — the stale flag ran the toggle backwards")
+	}
+	// The fold must be real: master shares the stack column, and it is tabbed.
+	ws := wsNode(t, conn, "7")
+	tracked := ms.WindowIDs()
+	if len(tracked) < 2 {
+		t.Fatalf("tracked=%v", tracked)
+	}
+	master, second := ws.FindByID(tracked[0]), ws.FindByID(tracked[1])
+	if master == nil || second == nil || master.Parent == nil || second.Parent == nil {
+		t.Fatalf("master/stack missing from tree (tracked=%v)", tracked)
+	}
+	if master.Parent != second.Parent {
+		t.Errorf("master %d and stack[0] %d are not folded together after maximize",
+			tracked[0], tracked[1])
+	} else if master.Parent.Layout != "tabbed" {
+		t.Errorf("fold parent %d layout = %q, want \"tabbed\"", master.Parent.ID, master.Parent.Layout)
+	}
+}

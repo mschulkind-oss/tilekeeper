@@ -728,6 +728,23 @@ func (m *MasterStack) popWindow(window *sway.Node) error {
 
 	m.windowIDs = append(m.windowIDs[:idx], m.windowIDs[idx+1:]...)
 
+	// The maximized fold is master-folded-into-the-stack-column: it needs
+	// two containers to share a parent, so below 2 tracked windows it
+	// cannot exist and the flag must go with it.
+	//
+	// Without this the flag outlives the shape it describes, and it is not
+	// inert while it does. toggleMaximize early-returns below 2 windows, so
+	// it never gets a chance to self-correct; when windows come back the
+	// next press reads maximized=true, decides it is UNmaximizing, and
+	// replays the restore (`layout splitv`, `move`, `resize set width
+	// <stale>px`) against a tree that was never folded — the key does the
+	// opposite of what it says and leaves a wrapper chain behind. The flag
+	// also suppresses the master-width-honored and master-stack-split
+	// invariants, so a stale one blinds the checks that would have noticed.
+	if len(m.windowIDs) < 2 {
+		m.maximized = false
+	}
+
 	// If master was removed and we have 2+ windows, promote.
 	//
 	// Preserve master width using the px snapshot captured during the last

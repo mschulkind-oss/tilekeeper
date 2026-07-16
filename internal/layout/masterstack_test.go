@@ -1866,3 +1866,87 @@ func TestPopWindowFallsBackToPptBeforeAnyArrange(t *testing.T) {
 		t.Fatalf("missing %q; got commands=%v", wantResize, mock.Commands)
 	}
 }
+
+// The maximized flag must not survive the shape it describes. toggleMaximize
+// early-returns below 2 windows, and only arrangeWindows ever clears the
+// flag, so closing the stack away while maximized used to strand
+// maximized=true on a workspace that is plainly not folded. The next
+// maximize press then read the stale flag, decided it was UNmaximizing, and
+// replayed the restore against a tree that was never folded — the key did
+// the opposite of what it says.
+//
+// Confirmed against real headless sway before fixing: maximize with 3,
+// close down to 1 (`splith(leaf)`, flag still true), reopen 2 (tree back to
+// a normal master/stack, flag STILL true), press maximize → it unmaximizes
+// and leaves a splitv(splitv(...)) chain.
+func TestMaximizedFlagClearedWhenFoldCollapses(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 3)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	if err := ms.Command("maximize", ws); err != nil {
+		t.Fatalf("maximize: %v", err)
+	}
+	if !ms.Maximized() {
+		t.Fatal("should be maximized after the toggle")
+	}
+
+	// Close the stack away, leaving a single window: the fold cannot exist.
+	for _, n := range []*sway.Node{ws.Nodes[2], ws.Nodes[1]} {
+		if err := ms.WindowRemoved(ws, n); err != nil {
+			t.Fatalf("WindowRemoved: %v", err)
+		}
+	}
+	if got := len(ms.WindowIDs()); got != 1 {
+		t.Fatalf("tracked %d windows, want 1", got)
+	}
+	if ms.Maximized() {
+		t.Errorf("still claims maximized with %d tracked window(s) — a fold needs two "+
+			"containers to share a parent, so the flag is now a lie that suppresses "+
+			"the master-width and master-stack-split checks", len(ms.WindowIDs()))
+	}
+}
+
+// The user-visible half: after the fold has collapsed, pressing maximize
+// must MAXIMIZE (fold the master into a tabbed stack), not silently run the
+// unmaximize restore.
+func TestMaximizePressAfterFoldCollapseMaximizes(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 3)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	if err := ms.Command("maximize", ws); err != nil {
+		t.Fatalf("maximize: %v", err)
+	}
+	// Collapse to one window, then grow back to three.
+	for _, n := range []*sway.Node{ws.Nodes[2], ws.Nodes[1]} {
+		if err := ms.WindowRemoved(ws, n); err != nil {
+			t.Fatalf("WindowRemoved: %v", err)
+		}
+	}
+	for _, n := range []*sway.Node{ws.Nodes[1], ws.Nodes[2]} {
+		if err := ms.WindowAdded(ws, n); err != nil {
+			t.Fatalf("WindowAdded: %v", err)
+		}
+	}
+	if got := len(ms.WindowIDs()); got != 3 {
+		t.Fatalf("tracked %d windows, want 3 (%v)", got, ms.WindowIDs())
+	}
+
+	mock.ClearCommands()
+	if err := ms.Command("maximize", ws); err != nil {
+		t.Fatalf("maximize press: %v", err)
+	}
+
+	if !ms.Maximized() {
+		t.Errorf("pressing maximize un-maximized instead of maximizing — the stale flag "+
+			"made the toggle run backwards; commands=%v", mock.Commands)
+	}
+	if len(mock.CommandsMatching("layout tabbed")) == 0 {
+		t.Errorf("no `layout tabbed` issued, so nothing was folded; commands=%v", mock.Commands)
+	}
+}
