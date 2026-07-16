@@ -121,10 +121,20 @@ One primary window, stack on the side. Classic tiling.
 
 `swap-master` promotes the focused window to master in MRU (alt-tab) order:
 the old master becomes Stack 1 and the windows the promoted one passed each
-shift down a slot — it is not a two-window trade. Because the previous master
-is always waiting at the top of the stack, focusing the stack and promoting
-(`$mod+o` then `$mod+Return`) alternates between the same two windows, leaving
-the rest of the stack undisturbed.
+shift down a slot — it is not a two-window trade. Its other half is `focus`
+toward the stack, which always lands on Stack 1 rather than on whichever
+window sway happened to focus there last. Together they make focus-then-promote
+alternate between the same two windows, leaving the rest of the stack
+undisturbed:
+
+```bash
+bindsym $mod+o      nop tilekeeper focus right   # → Stack 1 (the ex-master)
+bindsym $mod+Return nop tilekeeper swap-master   # → promote it back
+```
+
+Both bindings must route through tilekeeper. A native `bindsym $mod+o focus
+right` cannot do this: sway enters a container via its focus history, so it
+lands mid-stack and the cycle drags in a third window.
 
 ### Tabbed
 

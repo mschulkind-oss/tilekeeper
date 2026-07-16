@@ -513,6 +513,100 @@ func TestSwapMasterAltTabCycle(t *testing.T) {
 	}
 }
 
+// Focusing from master toward the stack must land on the TOP of the stack,
+// which under MRU promotion is the window just demoted from master — the
+// other half of the $mod+o / $mod+Return alt-tab cycle.
+//
+// The assertion is on the emitted command, and that is the whole point:
+// delegating to sway's native `focus right` is exactly the bug. Sway
+// descends into a container via its focus history (seat_get_focus_inactive),
+// NOT its first child, so it lands on whichever stack window was touched
+// last — "somewhere in the middle". Verified against real headless sway:
+// with master=5 and column=[6 top, 7 middle, 8 bottom], touching 7 and then
+// running `focus right` from master lands on 7, not 6. So the fix is to
+// stop delegating and name the target con_id explicitly.
+//
+// This cannot be asserted against the sim: sim.directionalSibling descends
+// with `leaf.Nodes[0]`, so the sim lands on the TOP and would pass even on
+// the unfixed code. See the divergence note in internal/harness/sim/apply.go.
+func TestFocusTowardStackLandsOnTop(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 4)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	ids := slices.Clone(ms.WindowIDs())
+	master, top := ids[0], ids[1]
+
+	// Stack is on the right by default, so $mod+o (focus right) from the
+	// master heads into the stack.
+	focusOnly(t, ws, master)
+	mock.ClearCommands()
+	if err := ms.Command("focus right", ws); err != nil {
+		t.Fatalf("focus right: %v", err)
+	}
+
+	want := fmt.Sprintf("[con_id=%d] focus", top)
+	if !mock.HasCommand(want) {
+		t.Errorf("focus right from master issued %v, want %q — focus must name the\n"+
+			"top of the stack, not delegate to sway's focus-history descent",
+			mock.Commands, want)
+	}
+	for _, c := range mock.Commands {
+		if c == "focus right" {
+			t.Errorf("issued a bare %q: sway would descend by focus history and land on\n"+
+				"the last-touched stack window instead of the top", c)
+		}
+	}
+}
+
+// Focusing away from the stack still falls through to sway, which is what
+// keeps focus able to cross to another output — the master column is not
+// the edge of the world.
+func TestFocusAwayFromStackDelegatesToSway(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 4)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	focusOnly(t, ws, ms.WindowIDs()[0])
+	mock.ClearCommands()
+	if err := ms.Command("focus left", ws); err != nil {
+		t.Fatalf("focus left: %v", err)
+	}
+
+	if !mock.HasCommand("focus left") {
+		t.Errorf("focus left from master issued %v, want a native %q to fall through\n"+
+			"to sway (cross-output navigation)", mock.Commands, "focus left")
+	}
+}
+
+// With the stack on the left, the direction that heads into it flips.
+func TestFocusTowardStackHonorsStackSide(t *testing.T) {
+	cfg := DefaultMasterStackConfig()
+	cfg.StackSide = SideLeft
+	ms, mock := newTestMasterStack(cfg)
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 4)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	ids := slices.Clone(ms.WindowIDs())
+	focusOnly(t, ws, ids[0])
+	mock.ClearCommands()
+	if err := ms.Command("focus left", ws); err != nil {
+		t.Fatalf("focus left: %v", err)
+	}
+
+	want := fmt.Sprintf("[con_id=%d] focus", ids[1])
+	if !mock.HasCommand(want) {
+		t.Errorf("with stackSide=left, focus left from master issued %v, want %q",
+			mock.Commands, want)
+	}
+}
+
 func TestSwapMasterTooFewWindows(t *testing.T) {
 	ms, _ := newTestMasterStack()
 	sway.ResetIDCounter()

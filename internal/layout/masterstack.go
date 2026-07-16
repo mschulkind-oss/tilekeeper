@@ -956,11 +956,10 @@ func (m *MasterStack) onCommand(cmd string, ws *sway.Node) error {
 		return m.focusRelative(ws, -1)
 	case "focus down":
 		return m.focusRelative(ws, 1)
-	case "focus left", "focus right":
-		// Horizontal navigation across the master/stack divide is sway's
-		// job — fall through to native focus so it crosses containers.
-		m.runCmd("focus %s", strings.TrimPrefix(cmd, "focus "))
-		return nil
+	case "focus left":
+		return m.focusHorizontal(ws, SideLeft)
+	case "focus right":
+		return m.focusHorizontal(ws, SideRight)
 	case "move up":
 		return m.moveRelative(ws, -1)
 	case "move down":
@@ -1009,6 +1008,54 @@ func (m *MasterStack) focusPrevious() error {
 		return nil
 	}
 	m.runCmd("[con_id=%d] focus", *m.lastFocusedID)
+	return nil
+}
+
+// focusHorizontal moves focus across the master/stack divide.
+//
+// Heading from the master INTO the stack, it names the top of the stack
+// explicitly rather than letting sway pick. Sway's directional focus
+// descends into a container via that container's focus history
+// (seat_get_focus_inactive), not its first child, so a native `focus
+// <stack side>` lands on whichever stack window was touched last —
+// arbitrary, and usually somewhere in the middle. Verified against real
+// headless sway: master=5, column=[6 top, 7 middle, 8 bottom]; touch 7,
+// return to master, `focus right` → 7.
+//
+// The top of the stack is where MRU promotion parks the window that just
+// left master (see swapMaster), so pinning focus there is what makes
+// focus-into-stack + swap-master alternate between the same two windows.
+// A focus-history landing breaks that cycle by dragging in a third.
+//
+// Every other direction still falls through to native focus: the master
+// column is not the edge of the world, and sway is what carries focus
+// across outputs and into neighbouring workspaces.
+func (m *MasterStack) focusHorizontal(ws *sway.Node, toSide Side) error {
+	native := func() error {
+		m.runCmd("focus %s", toSide.MoveDir())
+		return nil
+	}
+	if len(m.windowIDs) < 2 || ws == nil {
+		return native()
+	}
+	focused := ws.FindFocused()
+	if focused == nil {
+		return native()
+	}
+	idx := m.indexOf(focused.ID)
+	// Untracked (floating, foreign) window, or not heading stackward from a
+	// master — sway's own notion of "that way" is the better answer.
+	if idx < 0 || idx >= m.config.MasterCount || toSide != m.config.StackSide {
+		return native()
+	}
+	// windowIDs is [master(s)..., stack...], so the stack's top sits at
+	// MasterCount. Guarded by the len >= 2 check plus adjustMasterCount
+	// keeping MasterCount <= len-1.
+	top := m.config.MasterCount
+	if top >= len(m.windowIDs) {
+		return native()
+	}
+	m.runCmd("[con_id=%d] focus", m.windowIDs[top])
 	return nil
 }
 

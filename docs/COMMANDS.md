@@ -22,7 +22,7 @@ optional target workspace: `… workspace <name>` in a binding, `--workspace
 | Action | Meaning |
 |---|---|
 | `swap-master` | promote the focused window to master; the old master becomes the top of the stack (MRU / alt-tab order) |
-| `focus <left\|right\|up\|down>` | move focus directionally |
+| `focus <left\|right\|up\|down>` | move focus directionally; toward the stack from the master lands on the top of the stack (MRU partner), not sway's last-focused |
 | `focus <master\|previous>` | focus the master / the previously focused window |
 | `move <left\|right\|up\|down>` | move the focused window |
 | `rotate <cw\|ccw>` | rotate windows through the layout |

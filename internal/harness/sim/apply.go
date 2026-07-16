@@ -345,6 +345,30 @@ func (s *SimSwayClient) setFocus(n *sway.Node) {
 
 // directionalSibling finds the sibling of n in direction dir. "left" /
 // "right" works along splith parents; "up" / "down" along splitv.
+//
+// KNOWN DIVERGENCE — descent into a container.
+//
+// When the sibling is a container rather than a leaf, this descends via
+// Nodes[0] (the FIRST child). Real sway descends via the container's focus
+// history (seat_get_focus_inactive) — the LAST-FOCUSED child. Measured
+// against real headless sway on 2026-07-16: master=5 beside column=[6 top,
+// 7 middle, 8 bottom]; focus 7, focus 5, then `focus right` lands on 7 in
+// sway and on 6 here.
+//
+// Consequence for testing: the sim lands on the top of the stack, which is
+// the BEHAVIOUR PRODUCTION WANTS, so a sim-based test of directional focus
+// passes even against code that wrongly delegates to sway. That is exactly
+// how the 2026-07-16 "$mod+o lands mid-stack" bug stayed invisible to the
+// harness. Do not use the sim to assert where directional focus lands —
+// assert on the emitted command instead (see
+// TestFocusTowardStackLandsOnTop in internal/layout).
+//
+// Not modeled because it needs per-container focus-history bookkeeping the
+// sim has no other use for, and MasterStack no longer depends on it: it
+// names the con_id explicitly when crossing into the stack, and elsewhere a
+// focus-history landing is the desired behavior anyway. Modeling it would
+// let the fuzzer reach the scenario, but no invariant expresses "focus is on
+// the right window" — that is layout semantics, not a structural property.
 func (s *SimSwayClient) directionalSibling(n *sway.Node, dir string) *sway.Node {
 	for cur := n; cur.Parent != nil; cur = cur.Parent {
 		p := cur.Parent
