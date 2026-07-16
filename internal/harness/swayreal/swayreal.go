@@ -50,17 +50,26 @@ var knownClients = []string{
 	"/nix/store/msclaibiqsw1y11ycm5sydrivzm72a90-kitty-0.45.0/bin/kitty",
 }
 
-// FindSwayBinary resolves the sway binary path using the documented
-// precedence: $PATH, then $SWAY_BIN, then the known nix-store fallback.
-// Returns ErrNoSway if none exist.
+// FindSwayBinary resolves the sway binary path with the precedence
+// $SWAY_BIN, then $PATH, then the known nix-store fallback. Returns
+// ErrNoSway if none exist.
+//
+// $SWAY_BIN deliberately outranks $PATH. It used to be the other way round,
+// which made the variable useless as an override and left the harness
+// unusable wherever PATH's sway does not work headlessly: nix's `sway` is a
+// wrapper that execs dbus-run-session, so in a container without
+// dbus-daemon it dies before opening the IPC socket, and the run failed with
+// "socket did not appear" while a perfectly good unwrapped binary sat in
+// $SWAY_BIN being ignored. An explicit override losing to ambient PATH is
+// the wrong way round.
 func FindSwayBinary() (string, error) {
-	if p, err := exec.LookPath("sway"); err == nil {
-		return p, nil
-	}
 	if env := os.Getenv("SWAY_BIN"); env != "" {
 		if fileExists(env) {
 			return env, nil
 		}
+	}
+	if p, err := exec.LookPath("sway"); err == nil {
+		return p, nil
 	}
 	if fileExists(knownSwayBin) {
 		return knownSwayBin, nil

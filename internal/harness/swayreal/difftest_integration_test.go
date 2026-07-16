@@ -20,7 +20,7 @@ func startSwayOrSkip(t *testing.T) *Sway {
 	t.Helper()
 	sw, err := Start(Options{StartTimeout: 15 * time.Second})
 	if err == ErrNoSway {
-		t.Skip("no sway binary found (PATH, $SWAY_BIN, known nix path) — skipping integration test")
+		t.Skip("no sway binary found ($SWAY_BIN, PATH, known nix path) — skipping integration test")
 	}
 	if err != nil {
 		t.Fatalf("start headless sway: %v", err)
