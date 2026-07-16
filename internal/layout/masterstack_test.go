@@ -2,6 +2,7 @@ package layout
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/mschulkind-oss/tilekeeper/internal/sway"
@@ -427,6 +428,88 @@ func TestSwapMaster(t *testing.T) {
 	swapCmds := mock.CommandsMatching("swap container")
 	if len(swapCmds) == 0 {
 		t.Error("no swap command issued")
+	}
+}
+
+// focusOnly makes id the sole focused leaf in ws, so a command sees the
+// focus a user's keypress would have left behind.
+func focusOnly(t *testing.T, ws *sway.Node, id int64) {
+	t.Helper()
+	for _, n := range ws.Nodes {
+		n.Focused = false
+	}
+	target := ws.FindByID(id)
+	if target == nil {
+		t.Fatalf("window %d not in tree", id)
+	}
+	target.Focused = true
+}
+
+// swap-master promotes with MRU (alt-tab) ordering: the old master lands
+// at the top of the stack and everything it passed shifts down one, so it
+// does not trade places with the promoted window.
+func TestSwapMasterMRUOrder(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 4)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	ids := slices.Clone(ms.WindowIDs())
+	a, b, c, d := ids[0], ids[1], ids[2], ids[3]
+
+	// Promote the bottom stack window.
+	focusOnly(t, ws, d)
+	if err := ms.Command("swap-master", ws); err != nil {
+		t.Fatalf("swap-master: %v", err)
+	}
+
+	want := []int64{d, a, b, c}
+	if got := ms.WindowIDs(); !slices.Equal(got, want) {
+		t.Errorf("after promoting bottom window: got %v, want %v (old master to top of stack)", got, want)
+	}
+}
+
+// Promoting the top of the stack repeatedly alternates between the same
+// two windows, and the rest of the stack keeps its order — the property
+// that makes $mod+o / $mod+Return behave like alt-tab.
+func TestSwapMasterAltTabCycle(t *testing.T) {
+	ms, mock := newTestMasterStack()
+	sway.ResetIDCounter()
+	ws := sway.CreateWorkspace("1", 4)
+	mock.Tree = ws
+	ms.ArrangeAll(ws)
+
+	ids := slices.Clone(ms.WindowIDs())
+	a, b, c, d := ids[0], ids[1], ids[2], ids[3]
+
+	// Seed the cycle by promoting the bottom window: [d a b c].
+	focusOnly(t, ws, d)
+	if err := ms.Command("swap-master", ws); err != nil {
+		t.Fatalf("seed swap-master: %v", err)
+	}
+
+	// Each round focuses the top of the stack and promotes it, which is
+	// what $mod+o followed by $mod+Return does.
+	for round, want := range [][]int64{
+		{a, d, b, c},
+		{d, a, b, c},
+		{a, d, b, c},
+		{d, a, b, c},
+	} {
+		top := ms.WindowIDs()[1]
+		focusOnly(t, ws, top)
+		if err := ms.Command("swap-master", ws); err != nil {
+			t.Fatalf("round %d swap-master: %v", round, err)
+		}
+		if got := ms.WindowIDs(); !slices.Equal(got, want) {
+			t.Fatalf("round %d: got %v, want %v", round, got, want)
+		}
+	}
+
+	// The untouched tail never moved.
+	if got := ms.WindowIDs()[2:]; !slices.Equal(got, []int64{b, c}) {
+		t.Errorf("tail = %v, want %v (cycling must not disturb the rest of the stack)", got, []int64{b, c})
 	}
 }
 

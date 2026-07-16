@@ -119,6 +119,13 @@ One primary window, stack on the side. Classic tiling.
 └─────────┴──────────┘
 ```
 
+`swap-master` promotes the focused window to master in MRU (alt-tab) order:
+the old master becomes Stack 1 and the windows the promoted one passed each
+shift down a slot — it is not a two-window trade. Because the previous master
+is always waiting at the top of the stack, focusing the stack and promoting
+(`$mod+o` then `$mod+Return`) alternates between the same two windows, leaving
+the rest of the stack undisturbed.
+
 ### Tabbed
 
 Every window becomes a tab in one flat tab strip; directional `focus`/`move`

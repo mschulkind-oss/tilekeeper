@@ -1057,6 +1057,17 @@ func (m *MasterStack) moveHorizontal(ws *sway.Node, toSide Side) error {
 	return nil
 }
 
+// swapMaster promotes the focused window to master with MRU (alt-tab)
+// ordering: the old master becomes the top of the stack and the windows
+// the promoted one passed each shift down by one. It deliberately does
+// not trade the two windows' places.
+//
+// The MRU order is what makes promote/focus cycles stable: after a
+// promotion the previous master sits at the top of the stack, which is
+// where `focus <stack side>` lands, so focus-then-promote alternates
+// between the same two windows instead of dragging a third one in. Under
+// swap semantics the old master was exiled to the promoted window's old
+// slot, so the cycle partner moved every time.
 func (m *MasterStack) swapMaster(ws *sway.Node) error {
 	if len(m.windowIDs) < 2 {
 		return nil
@@ -1068,12 +1079,18 @@ func (m *MasterStack) swapMaster(ws *sway.Node) error {
 	}
 
 	idx := m.indexOf(focused.ID)
-	if idx < 0 || idx == 0 {
+	if idx <= 0 {
 		return nil
 	}
 
-	m.swapWindows(focused.ID, m.windowIDs[0])
-	m.windowIDs[0], m.windowIDs[idx] = m.windowIDs[idx], m.windowIDs[0]
+	// Rotate windowIDs[0:idx+1] right by one, bubbling the focused window
+	// up through adjacent swaps. Adjacent swaps (rather than one move)
+	// keep every step a sibling exchange, including the one that crosses
+	// the master/stack boundary.
+	for i := idx; i > 0; i-- {
+		m.swapWindows(m.windowIDs[i-1], m.windowIDs[i])
+		m.windowIDs[i-1], m.windowIDs[i] = m.windowIDs[i], m.windowIDs[i-1]
+	}
 	return m.setMasterWidth()
 }
 

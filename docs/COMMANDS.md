@@ -21,7 +21,7 @@ optional target workspace: `… workspace <name>` in a binding, `--workspace
 
 | Action | Meaning |
 |---|---|
-| `swap-master` | swap the focused window with the master |
+| `swap-master` | promote the focused window to master; the old master becomes the top of the stack (MRU / alt-tab order) |
 | `focus <left\|right\|up\|down>` | move focus directionally |
 | `focus <master\|previous>` | focus the master / the previously focused window |
 | `move <left\|right\|up\|down>` | move the focused window |
