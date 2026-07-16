@@ -421,6 +421,26 @@ See [docs/session-manager-integration.md](docs/session-manager-integration.md) f
 
 ## 🔧 Running as a Service
 
+From a checkout, one command builds, installs, writes the unit, enables it,
+and restarts the daemon — then verifies the new build is actually the one
+running:
+
+```bash
+just deploy
+```
+
+It is idempotent, so it is also the way to ship a change to a machine that
+is already running tilekeeper. `just uninstall` reverses it. Installing from
+a release binary instead? `tilekeeper install-service` writes the unit
+(pointing at the installed binary), and you enable it yourself:
+
+```bash
+tilekeeper install-service
+systemctl --user enable --now tilekeeper
+```
+
+The unit it writes looks like this:
+
 ```ini
 # ~/.config/systemd/user/tilekeeper.service
 [Unit]
@@ -433,10 +453,6 @@ Restart=on-failure
 
 [Install]
 WantedBy=graphical-session.target
-```
-
-```bash
-systemctl --user enable --now tilekeeper
 ```
 
 ## Roadmap

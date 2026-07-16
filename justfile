@@ -73,28 +73,99 @@ install: build
     set -euo pipefail
     dest="${GOBIN:-${HOME}/.local/bin}"
     mkdir -p "$dest"
-    cp bin/tilekeeper "$dest/tilekeeper"
+    # Swap the binary in via a same-directory temp file + rename(2), never
+    # by writing through the destination path. The daemon normally IS
+    # $dest/tilekeeper, and the kernel refuses to open a running
+    # executable for writing — plain `cp` dies with ETXTBSY ("Text file
+    # busy"). rename(2) replaces only the directory entry: the running
+    # daemon keeps its old inode until it restarts, and anything exec'ing
+    # $dest/tilekeeper concurrently sees either the old or the new binary,
+    # never a half-written one. The temp file has to live in $dest —
+    # rename(2) cannot cross filesystems.
+    tmp="$(mktemp "$dest/.tilekeeper.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    cp bin/tilekeeper "$tmp"
+    chmod 755 "$tmp"   # mktemp creates 0600
+    mv -f "$tmp" "$dest/tilekeeper"
+    trap - EXIT
     echo "Installed to ${dest}/tilekeeper"
 
-# Uninstall from ~/.local/bin (or GOBIN)
+# Remove the binary and tear down the systemd user service
 uninstall:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Tear the service down BEFORE removing the binary. install-service
+    # enables the unit, so skipping this would leave systemd crash-looping
+    # (Restart=on-failure) on a missing ExecStart at every login.
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user is-enabled tilekeeper >/dev/null 2>&1 \
+          || systemctl --user is-active tilekeeper >/dev/null 2>&1; then
+            systemctl --user disable --now tilekeeper 2>/dev/null || true
+            echo "Stopped and disabled tilekeeper.service"
+        fi
+        rm -f "${HOME}/.config/systemd/user/tilekeeper.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
     dest="${GOBIN:-${HOME}/.local/bin}"
     rm -f "$dest/tilekeeper"
     echo "Removed ${dest}/tilekeeper"
 
-# Install the systemd user service
+# Write the systemd user unit, then reload + enable it (idempotent)
 install-service: install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Writes the unit with ExecStart pointing at the installed binary
+    # (not this repo's bin/), so the service survives moving or cleaning
+    # the checkout.
     bin/tilekeeper install-service
+    # A newly written unit is invisible to systemd — and so to `enable` —
+    # until it re-reads the directory.
+    systemctl --user daemon-reload
+    # Idempotent, and what makes `just deploy` work on a fresh machine:
+    # without it the first deploy leaves nothing to start at login.
+    systemctl --user enable tilekeeper >/dev/null
+    echo "Service installed and enabled"
 
 # Restart the systemd service, picking up any unit-file changes first
 restart-service:
+    #!/usr/bin/env bash
+    set -euo pipefail
     systemctl --user daemon-reload
     systemctl --user restart tilekeeper
+    # The unit is Type=simple, so `restart` reports success the moment the
+    # process is forked — a binary that dies on startup still looks like a
+    # clean restart, and Restart=on-failure then quietly crash-loops it.
+    # Give it a beat to fall over, then confirm it actually stayed up.
+    sleep 0.5
+    if ! systemctl --user is-active --quiet tilekeeper; then
+        echo "ERROR: tilekeeper is not running after restart" >&2
+        systemctl --user status tilekeeper --no-pager --lines=20 >&2 || true
+        exit 1
+    fi
+    # `install` can now swap the binary while the daemon runs, so a restart
+    # that silently didn't take is no longer caught by ETXTBSY the way it
+    # used to be. A process still holding the replaced inode has its
+    # /proc/<pid>/exe link marked "(deleted)" — i.e. the running code is NOT
+    # what was just built, which is exactly what this check makes loud.
+    # Match on the marker rather than comparing paths: /proc/<pid>/exe is
+    # fully symlink-resolved, so a resolved ~/.local/bin would never compare
+    # equal to the path install wrote to.
+    pid="$(systemctl --user show -P MainPID tilekeeper)"
+    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+        case "$exe" in
+            *" (deleted)")
+                echo "ERROR: daemon (pid $pid) is still running a replaced binary:" >&2
+                echo "       $exe" >&2
+                echo "       The restart did not take — the new build is NOT live." >&2
+                exit 1
+                ;;
+        esac
+    fi
+    echo "✓ tilekeeper active (pid ${pid})"
 
-# Full rebuild and restart: build, install, restart service
-deploy: install restart-service
+# Full rebuild and restart: build, install, write/refresh the unit, restart
+deploy: install install-service restart-service
     @echo "tilekeeper deployed and service restarted"
 
 # Show service status

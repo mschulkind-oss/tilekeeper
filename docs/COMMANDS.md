@@ -57,7 +57,7 @@ Not bindable — a `nop` binding is fire-and-forget and can't return output.
 | `tilekeeper daemon` | run the daemon (foreground) |
 | `tilekeeper doctor` | environment / health check |
 | `tilekeeper version` | version, commit, build info |
-| `tilekeeper install-service` | write the systemd user unit |
+| `tilekeeper install-service` | write the systemd user unit (`just deploy` does this plus enable + restart) |
 
 ## Example Sway config
 
