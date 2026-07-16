@@ -9,7 +9,7 @@
     "master-width-honored": 0,
     "no-wrapper-chain": 394,
     "tracked-matches-leaves": 38331,
-    "master-width-degenerate": 125,
+    "master-width-degenerate": 120,
     "master-stack-split": 12955
   },
   "justifications": {
@@ -21,7 +21,7 @@
     "master-width-honored": "(clean) REAL-bug class after the deliverable-1 split: master width is only checked when the layout structure is HEALTHY (master does NOT share its parent with a stack window). Floor 0 — a master-width regression (e.g. reverting 6ae4d4a's stale-rect snapshot) drives this NON-ZERO (measured: 8 over this reference config). This is the gate's primary master-width signal.",
     "no-wrapper-chain": "(sim) Persistent singleton-wrapper chains. Dominated by MasterStack not always flattening chaotic foreign trees the aggressive genContainerWorkspaceMove generator builds; cumulative-with-persistence so one bad state recounts every step. Distinct bad states are far fewer. Drive down by improving flatten coverage on foreign nested trees.",
     "tracked-matches-leaves": "(sim+gen) Manager tracking vs sim leaf set. Dominated by (a) sim moveDir cannot cross container boundaries (master_stack_split_test.go:106-111) and (b) genContainerWorkspaceMove moving whole workspaces repeatedly, stranding fellow-traveler leaves. Cumulative-with-persistence. Largest residual; the distinct-state count is small.",
-    "master-width-degenerate": "(sim+gen) FALSE-POSITIVE class split off from master-width-honored: the master shares its parent with stack windows, i.e. the stack column is already missing (the master-stack-split bug shape), so `resize 75 ppt` is divided across degenerate siblings and the width is meaningless BY CONSTRUCTION. master-stack-split owns the real structural signal. Driving master-stack-split to 0 drives this to 0.",
+    "master-width-degenerate": "(sim+gen) FALSE-POSITIVE class split off from master-width-honored: the master shares its parent with stack windows, i.e. the stack column is already missing (the master-stack-split bug shape), so `resize 75 ppt` is divided across degenerate siblings and the width is meaningless BY CONSTRUCTION. master-stack-split owns the real structural signal. Driving master-stack-split to 0 drives this to 0. Lowered 125 -> 120 when swap-master moved to MRU promotion (8046d40): the adjacent-swap chain spends fewer steps parked in a degenerate shape than the old single cross-boundary swap. Incidental, not a targeted fix — the class is still owned by master-stack-split.",
     "master-stack-split": "(sim+gen+prod) Master shares its parent with a stack window (stack column missing). Dominated by sim moveDir boundary limitation + aggressive workspace-move generator + the MasterStack-not-flattening-foreign-trees / Tabbed multi-child nesting follow-up. Cumulative-with-persistence. The honest open production residual is small relative to this count."
   }
 }
