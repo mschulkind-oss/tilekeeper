@@ -293,33 +293,7 @@ func runInstallService() {
 	}
 
 	servicePath := filepath.Join(serviceDir, "tilekeeper.service")
-
-	// Build environment lines — pass through sway-related vars
-	var envLines []string
-	for _, key := range []string{"SWAYSOCK", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DISPLAY"} {
-		if val := os.Getenv(key); val != "" {
-			envLines = append(envLines, fmt.Sprintf("Environment=%s=%s", key, val))
-		}
-	}
-	envBlock := ""
-	if len(envLines) > 0 {
-		envBlock = strings.Join(envLines, "\n") + "\n"
-	}
-
-	serviceContent := fmt.Sprintf(`[Unit]
-Description=tilekeeper — a layout manager for Sway/Wayland
-After=graphical-session.target
-PartOf=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart=%s daemon
-Restart=on-failure
-RestartSec=3
-%s
-[Install]
-WantedBy=graphical-session.target
-`, exePath, envBlock)
+	serviceContent := serviceUnitContent(execStartPath(exePath, home), swaySessionTargetPresent())
 
 	switch planServiceWrite(servicePath, serviceContent) {
 	case serviceUpToDate:
@@ -378,6 +352,76 @@ func planServiceWrite(path, content string) serviceAction {
 		return serviceUpToDate
 	}
 	return serviceUpdated
+}
+
+// serviceUnitContent builds the systemd user unit for the daemon.
+//
+// Ordering is the whole ballgame here. When the host uses the sway convention
+// (sway-session.target present) we order and enable against sway-session.target
+// and leave PartOf=graphical-session.target. Using After=graphical-session.target
+// while enabled into sway-session.target.wants closes an ordering cycle
+// (sway-session→tilekeeper→graphical-session→sway-session) that systemd breaks
+// by *deleting* tilekeeper's start job — enabled, no error logged, never runs.
+// Without sway-session.target we fall back to the generic graphical-session.target
+// pattern, which is cycle-safe because no sway-session Before edge exists there.
+//
+// No Environment= lines: sway pushes SWAYSOCK/WAYLAND_DISPLAY/etc. into the
+// systemd user environment (dbus-update-activation-environment), so a unit
+// ordered after the session inherits the live values. Snapshotting them here
+// froze a dead sway PID into SWAYSOCK across a reboot.
+func serviceUnitContent(binPath string, useSwaySession bool) string {
+	target := "graphical-session.target"
+	if useSwaySession {
+		target = "sway-session.target"
+	}
+	return fmt.Sprintf(`[Unit]
+Description=tilekeeper — a layout manager for Sway/Wayland
+After=%[1]s
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%[2]s daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=%[1]s
+`, target, binPath)
+}
+
+// execStartPath renders the ExecStart binary path. When the binary lives under
+// $HOME it is emitted as %h/<rel> so the unit stays portable across machines
+// (and matches the documented form); otherwise the absolute path is used.
+func execStartPath(exePath, home string) string {
+	if home == "" {
+		return exePath
+	}
+	rel, err := filepath.Rel(home, exePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return exePath
+	}
+	return "%h/" + filepath.ToSlash(rel)
+}
+
+// swaySessionTargetPresent reports whether the systemd user manager knows a
+// sway-session.target unit, so install-service can order against it. A missing
+// systemctl (or any error) is treated as "absent" → generic fallback.
+func swaySessionTargetPresent() bool {
+	out, err := exec.Command("systemctl", "--user", "list-unit-files", "sway-session.target").Output()
+	if err != nil {
+		return false
+	}
+	return swaySessionListed(string(out))
+}
+
+// swaySessionListed parses `systemctl --user list-unit-files sway-session.target`
+// output. Split out from the shell-out so the present/absent decision is a
+// tested property. `list-unit-files` prints "0 unit files listed." (and may exit
+// 0) when nothing matches, so we look for the unit name rather than trusting the
+// exit code alone.
+func swaySessionListed(listUnitFilesOutput string) bool {
+	return strings.Contains(listUnitFilesOutput, "sway-session.target")
 }
 
 func writeServiceUnit(path, content string) error {
