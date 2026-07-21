@@ -1,8 +1,50 @@
 # Handoff: `install-service` writes a unit that never starts at boot
 
-**Status:** host-side workaround applied 2026-07-21; the generator in this repo is still broken.
+**Status:** RESOLVED 2026-07-21 — the two tool-level defects are fixed in this
+repo. The third (symlink clobber) is deliberately *not* a tool concern; it's a
+host config matter (see below).
 **Owner:** tilekeeper agent
-**Severity:** high — every `just deploy` silently disables the daemon at next boot.
+**Severity:** high — every `just deploy` silently disabled the daemon at next boot.
+
+## Resolution
+
+The two defects that actually belong to the generator are fixed in
+`cmd/tilekeeper/main.go`, with regression pins in
+`cmd/tilekeeper/install_service_test.go` (each written red-first against the
+broken template):
+
+1. **Ordering cycle** — `serviceUnitContent` now emits `After=`/`WantedBy=`
+   `sway-session.target` when that target exists (`swaySessionTargetPresent`
+   probes `systemctl --user list-unit-files`), falling back to the generic
+   `graphical-session.target` pattern otherwise. `PartOf=graphical-session.target`
+   stays. Pinned by `TestServiceUnitNoOrderingCycle`.
+2. **Frozen env** — the `Environment=` snapshot loop is gone; the unit carries no
+   `Environment=` lines. Pinned by `TestServiceUnitNoFrozenSwaysock`.
+
+Also: `ExecStart` renders as `%h/...` for a binary under `$HOME` (host-portable,
+matches the README), and `README.md` now documents the corrected unit.
+
+`install-service` writes its unit with a plain `os.WriteFile`, exactly as before
+— no symlink/dotfiles awareness.
+
+### On defect #3 (symlink clobber) — not the tool's job
+
+The clobber happened because `~/.config/systemd/user/tilekeeper.service` was a
+symlink into a dotfiles/rcm tree, so a plain write went *through* the link and
+rewrote the tracked source. Teaching `install-service` to detect and refuse that
+would bake host-specific dotfiles knowledge into a general-purpose tool — the
+wrong layer. The generator installs the unit the normal way; whether that path
+is a symlink into a config manager is the host's setup to decide.
+
+The durable host fix is to stop tracking a generated file: let `install-service`
+own `~/.config/systemd/user/tilekeeper.service` directly (not a dotfiles
+symlink), so a `just deploy` writes the real file and there is nothing for
+`git add -A` to clobber.
+
+This bug lives entirely in the `install-service` unit generator, outside the
+simulated sway event stream, so the fuzzer/sim harness has no reach here; the
+regression coverage is the unit tests above (per the AGENTS.md note on scenarios
+the fuzzer cannot reach).
 
 ## Symptom
 
@@ -88,10 +130,10 @@ the link and silently overwrote the tracked dotfiles source. The corrupted unit
 was then picked up by a routine `git add -A` in dotfiles commit `bfa97cc`,
 reverting a fix that had been in place since `26e02b5`.
 
-**Fix:** before writing, `os.Lstat` the target. If it is a symlink pointing
-outside `~/.config/systemd/user`, do not write — print the resolved path and the
-unit content and tell the user to update the source themselves. A config
-manager's file is not ours to overwrite.
+**Fix (original proposal — NOT taken; see Resolution):** the handoff first
+proposed making `writeServiceUnit` `os.Lstat` the target and refuse an
+out-of-tree symlink. That was rejected as the wrong layer — the tool stays
+dotfiles-agnostic and this is fixed host-side instead.
 
 ## Required changes
 
@@ -99,8 +141,9 @@ manager's file is not ours to overwrite.
    `WantedBy=sway-session.target`, keep `PartOf=graphical-session.target`, delete
    the `envBlock` interpolation.
 2. `cmd/tilekeeper/main.go:297-306` — delete the env-snapshot loop and `envBlock`.
-3. `cmd/tilekeeper/main.go:383` — `writeServiceUnit` refuses to follow an
-   out-of-tree symlink.
+3. ~~`writeServiceUnit` refuses to follow an out-of-tree symlink.~~ NOT taken —
+   dotfiles awareness is the wrong layer; `writeServiceUnit` stays a plain write.
+   See Resolution.
 4. `README.md:454-466` — the documented unit shows the broken form. Update it.
 5. Consider generating `ExecStart=%h/.local/bin/tilekeeper daemon` rather than an
    absolute resolved path when the binary is under `$HOME` — cosmetic, but it
@@ -117,8 +160,8 @@ TDD, please — write each of these red first:
   Name it for the bug, not the assertion — this is a regression pin.
 - **No frozen env:** with `SWAYSOCK` set in the test env, assert the generated
   unit contains no `Environment=SWAYSOCK=` line.
-- **Symlink safety:** point the target path at a symlink into another temp dir,
-  run the write, assert the symlink is intact and the far-side file is unchanged.
+- ~~**Symlink safety:**~~ dropped along with the symlink-refusal proposal (see
+  Resolution). `writeServiceUnit` is a plain write with no symlink behavior to pin.
 
 `cmd/tilekeeper/install_service_test.go` is the right file; it already pins two
 prior install-service regressions and explains each in a comment. Match that
@@ -137,16 +180,25 @@ next deploy — that path is worth an assertion too.
 - Daemon verified running against the live socket, IPC listening, 22 windows
   arranged on workspace 8.
 
-The host is fixed but **not durable**: `just deploy` re-runs `install-service`,
-which will rewrite the dotfiles source through the symlink and reintroduce all
-three defects. Until this repo is fixed, `just deploy` is unsafe on this host.
+Now that the generator is fixed, `just deploy` writes the *correct* unit
+(sway-session ordering, no frozen env). One host wart remains: while
+`tilekeeper.service` is still a dotfiles symlink, the write lands on the dotfiles
+source (the content is now correct, but a stray `git add -A` in dotfiles would
+still track it). The durable host fix is to let `install-service` own
+`~/.config/systemd/user/tilekeeper.service` directly rather than symlinking it
+from dotfiles.
 
-## Open questions
+## Open questions — resolved
 
-1. Should `install-service` refuse to run at all when the target is a symlink, or
-   write to a `.new` sibling and print a diff? The refuse-and-print option is
-   simpler and hard to get wrong.
-2. Is `sway-session.target` a safe assumption for all users, or should the
-   generator detect it (`systemctl --user list-unit-files sway-session.target`)
-   and fall back to `graphical-session.target` only when it's absent? Detection
-   is more correct; a flag is more predictable.
+1. **Symlink handling:** neither refuse-and-print nor `.new`-and-diff — the tool
+   does nothing symlink-specific. `install-service` writes its unit with a plain
+   `os.WriteFile`. The dotfiles-symlink clobber is a host setup problem, fixed by
+   not tracking the generated unit in dotfiles; encoding config-manager awareness
+   in the generator is the wrong layer.
+2. **`sway-session.target` assumption:** detect and fall back. The generator
+   probes `systemctl --user list-unit-files sway-session.target` and only orders
+   against it when present; otherwise it uses `graphical-session.target` for
+   both `After=` and `WantedBy=` (cycle-safe, since no sway-session `Before` edge
+   exists on such a host). A missing `systemctl` is treated as absent. The
+   present/absent parse is unit-tested (`TestSwaySessionListed`); the thin
+   shell-out wrapper is the only uncovered line.

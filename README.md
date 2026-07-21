@@ -455,15 +455,30 @@ The unit it writes looks like this:
 # ~/.config/systemd/user/tilekeeper.service
 [Unit]
 Description=tilekeeper — a layout manager for Sway/Wayland
-After=graphical-session.target
+After=sway-session.target
+PartOf=graphical-session.target
 
 [Service]
+Type=simple
 ExecStart=%h/.local/bin/tilekeeper daemon
 Restart=on-failure
+RestartSec=3
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=sway-session.target
 ```
+
+It orders and enables against `sway-session.target` (the sway session
+convention). Ordering `After=graphical-session.target` while enabled into
+`sway-session.target.wants` closes an ordering cycle that systemd breaks by
+silently dropping tilekeeper's start job at boot — the unit stays enabled but
+never runs. `PartOf=graphical-session.target` stops the daemon when the session
+ends. On a host without `sway-session.target`, install-service falls back to the
+generic `graphical-session.target` for both `After=` and `WantedBy=`.
+
+The unit carries no `Environment=` lines: sway pushes `SWAYSOCK` and friends into
+the systemd user environment, so a session-ordered unit inherits the live
+values.
 
 ## Roadmap
 
