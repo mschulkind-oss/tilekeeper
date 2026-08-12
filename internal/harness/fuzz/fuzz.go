@@ -190,6 +190,7 @@ func RunWithTrace(cfg Config, trace *[]StepTrace) *Result {
 			checkTrackedMatchesLeaves(hub, s, cfg.Workspaces, ev, i, res)
 			checkMasterWidthHonored(hub, s, cfg.Workspaces, ev, i, res)
 			checkMasterStackSplit(hub, s, cfg.Workspaces, ev, i, res)
+			checkTabbedStripFlat(hub, s, cfg.Workspaces, ev, i, res)
 			// Surface any Hub-logged Error after the step. These cover
 			// "command failed" / "unknown command" rejections from layout
 			// managers — i.e. a binding the user has bound that lm cannot
@@ -827,6 +828,102 @@ func checkMaximizedFoldIntact(hub *workspace.Hub, s *sim.SimSwayClient, wsNames 
 					"workspace=%s claims maximized: master=%d is folded into parent=%d but its layout "+
 						"is %q, want \"tabbed\"; tracked=%v",
 					name, ids[0], master.Parent.ID, master.Parent.Layout, ids),
+			})
+		}
+	}
+}
+
+// checkTabbedStripFlat asserts the defining property of a Tabbed-managed
+// workspace: every tiled window is a tab in ONE FLAT STRIP, so sway draws a
+// single tab bar across the workspace and nothing is tiled beside it.
+//
+// Two tree shapes satisfy that, and both are accepted:
+//
+//   - the workspace container itself is tabbed, every leaf a direct child;
+//   - the workspace has exactly one tiled child, a tabbed container, and
+//     every leaf is a direct child of THAT.
+//
+// The second shape is what real sway builds for tilekeeper's own
+// `[workspace=N] layout tabbed` (criteria match views, so cmd_layout wraps
+// the workspace children — see the KNOWN DIVERGENCE note on sim.apply and
+// docs/handoff-tabbed-workspace-criteria.md). The sim currently produces the
+// first. Accepting both keeps this invariant true of production rather than
+// of one harness's model, and it catches the same bugs either way: a window
+// tiled BESIDE the strip, or tabs nested inside tabs.
+//
+// This is the invariant the ws8 "move left on the first tab pops the window
+// out of the strip and it takes half the screen" bug (2026-08-12) violates.
+// Tabbed forwarded `move left`/`move right` straight to sway; at the edge of
+// the strip sway does not stop — container_move_in_direction PROMOTES the
+// container out of its parent (sway/commands/move.c:394-410), leaving
+// workspace=[strip, escapee] with the escapee tiled beside the tabs. Nothing
+// repairs it either: the hub ignores same-workspace window::move events, so
+// the broken shape persists until the next add/arrange.
+//
+// Why the existing invariants did not own this:
+//   - no-wrapper-chain only fires when the leftover strip is a SINGLETON
+//     wrapper, i.e. the workspace had exactly two tabs. With three or more
+//     tabs the escape is invisible to it.
+//   - tracked-matches-leaves explicitly skips Tabbed (WindowIDs() == nil is
+//     the "defers to sway" sentinel), so no tracking check covers it.
+//
+// Both edges are covered by the same property, and it holds at every step:
+// Tabbed.ensure re-establishes the flat strip on every WindowAdded /
+// ArrangeAll, so a violation means something restructured the workspace
+// behind the manager's back.
+func checkTabbedStripFlat(hub *workspace.Hub, s *sim.SimSwayClient, wsNames []string, ev sway.Event, step int, res *Result) {
+	tree, _ := s.GetTree()
+	if tree == nil {
+		return
+	}
+	tree.SetParents()
+	for _, name := range wsNames {
+		mgr := hub.Manager(name)
+		if mgr == nil || mgr.Name() != "tabbed" {
+			continue
+		}
+		var wsNode *sway.Node
+		for _, ws := range tree.Workspaces() {
+			if ws.Name == name {
+				wsNode = ws
+				break
+			}
+		}
+		// Leaves() walks Nodes only, so floating windows (which legitimately
+		// sit outside the strip) are already excluded.
+		if wsNode == nil || len(wsNode.Leaves()) == 0 {
+			continue
+		}
+		// The strip is the workspace itself, or its single tiled child.
+		strip := wsNode
+		if wsNode.Layout != "tabbed" && len(wsNode.Nodes) == 1 {
+			strip = wsNode.Nodes[0]
+		}
+		if strip.Layout != "tabbed" && strip.Layout != "stacked" {
+			res.Violations = append(res.Violations, Violation{
+				Invariant: "tabbed-strip-flat",
+				Step:      step,
+				Event:     ev,
+				Detail: fmt.Sprintf(
+					"workspace=%s is tabbed-managed but has no tab strip: workspace layout=%q, %d tiled children",
+					name, wsNode.Layout, len(wsNode.Nodes)),
+			})
+			continue
+		}
+		var outside []int64
+		for _, leaf := range wsNode.Leaves() {
+			if leaf.Parent != strip {
+				outside = append(outside, leaf.ID)
+			}
+		}
+		if len(outside) > 0 {
+			res.Violations = append(res.Violations, Violation{
+				Invariant: "tabbed-strip-flat",
+				Step:      step,
+				Event:     ev,
+				Detail: fmt.Sprintf(
+					"workspace=%s has %d leaf/leaves outside the tab strip (strip=%d/%s): %v",
+					name, len(outside), strip.ID, strip.Layout, outside),
 			})
 		}
 	}

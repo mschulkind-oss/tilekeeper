@@ -129,6 +129,75 @@ func AllScenarios() []Scenario {
 				"[con_id=$0] splith",
 			},
 		},
+		{
+			Name:    "move-dir-interior-swap",
+			Windows: 2,
+			Why: "the case that must keep working: a container with a sibling in " +
+				"the move direction just swaps positions — no re-parenting, and " +
+				"(unlike every promote path) no percent churn.",
+			Commands: []string{
+				"[con_id=$1] move left",
+			},
+		},
+		{
+			Name:    "move-dir-promote-out-of-strip",
+			Windows: 3,
+			Why: "directional move at a container EDGE — sway promotes the " +
+				"container out of its parent instead of stopping (the ws8 " +
+				"tab-escape bug). Pins the sim's container_move_in_direction model.",
+			Commands: []string{
+				"[con_id=$0] layout tabbed", // wrap all three into a tabbed container
+				"[con_id=$0] move left",     // first tab, no left sibling → promoted out
+			},
+		},
+		{
+			Name:    "move-dir-reorient-workspace",
+			Windows: 3,
+			Why: "directional move with NO parallel ancestor — sway wraps the " +
+				"workspace children and flips the workspace axis " +
+				"(workspace_wrap_children) before promoting the mover.",
+			Commands: []string{
+				"[con_id=$1] layout tabbed",
+				"[con_id=$1] move up",
+			},
+		},
+		{
+			Name:    "move-dir-into-parallel-neighbor",
+			Windows: 3,
+			Why: "directional move toward a CONTAINER laid out along the move " +
+				"axis — sway descends into it rather than swapping with it.",
+			KnownGap: "insert-arrange percent, same class as floating-toggle: the " +
+				"STRUCTURE matches sway exactly (the mover descends into the column " +
+				"at the near end); only percents differ, because sway's arrange " +
+				"redistributes both the row it left and the row it joined, while the " +
+				"sim only zeroes the mover's own fraction and leaves redistribution " +
+				"to the layout managers.",
+			Commands: []string{
+				"[con_id=$1] splitv",     // $1 and $2 share a vertical column
+				"[con_id=$2] move up",    // ensure both live in that column
+				"[con_id=$0] move right", // enter the column from the left
+			},
+		},
+		{
+			Name:    "workspace-criteria-layout",
+			Windows: 3,
+			Why: "`[workspace=N] layout tabbed` — the command Tabbed.ensure issues. " +
+				"Sway criteria match VIEWS, so this runs per-window and wraps the " +
+				"workspace children in a tabbed CONTAINER; it does not tab the " +
+				"workspace container itself.",
+			KnownGap: "The sim resolves a [workspace=N] scope to the workspace NODE " +
+				"and sets its layout, so it builds a flat workspace-level tab strip " +
+				"where sway builds workspace(splith) > con(tabbed) > windows. Left " +
+				"unmodeled deliberately: Tabbed.ensure and Tabbed.flattenToTabs are " +
+				"written against the flat shape (\"every leaf a direct tab child\"), " +
+				"which that command cannot produce in real sway, so modeling it " +
+				"faithfully turns TestTabbedFlatten_ContainerMoveIn red with nested " +
+				"tabs — the sim gap is hiding a real Tabbed bug. Fixing both together " +
+				"is the follow-up in docs/handoff-tabbed-workspace-criteria.md.",
+			Commands: []string{
+				"[workspace=7] layout tabbed",
+			},
+		},
 	}
 }
 

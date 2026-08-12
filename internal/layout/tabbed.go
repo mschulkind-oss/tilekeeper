@@ -3,6 +3,7 @@ package layout
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/mschulkind-oss/tilekeeper/internal/sway"
@@ -80,12 +81,29 @@ func (t *Tabbed) ArrangeAll(ws *sway.Node) error {
 // If the workspace has no windows, we skip — real sway returns CMD_FAILURE
 // ("Cannot move workspaces in a direction") when no container is focused,
 // and forwarding produces noise without effect.
+//
+// Directional MOVES are additionally clamped to the tab strip — see
+// moveStaysInStrip. Focus is not clamped: at an edge sway's directional
+// focus either stays put or crosses to another output, and neither
+// restructures the tree.
 func (t *Tabbed) Command(cmd string, ws *sway.Node) error {
 	switch cmd {
-	case "focus up", "focus down", "focus left", "focus right",
-		"move up", "move down", "move left", "move right":
+	case "focus up", "focus down", "focus left", "focus right":
 		if ws == nil || len(ws.Leaves()) == 0 {
 			t.log().Debug("skipping nav on empty workspace", "command", cmd)
+			return nil
+		}
+		t.log().Debug("forwarding nav command to sway", "command", cmd)
+		return t.conn.RunCommand(cmd)
+	case "move up", "move down", "move left", "move right":
+		if ws == nil || len(ws.Leaves()) == 0 {
+			t.log().Debug("skipping nav on empty workspace", "command", cmd)
+			return nil
+		}
+		dir := strings.TrimPrefix(cmd, "move ")
+		if !t.moveStaysInStrip(ws, dir) {
+			t.log().Debug("move would leave the tab strip; stopping at the edge",
+				"command", cmd, "workspace", ws.Name)
 			return nil
 		}
 		t.log().Debug("forwarding nav command to sway", "command", cmd)
@@ -94,6 +112,85 @@ func (t *Tabbed) Command(cmd string, ws *sway.Node) error {
 		t.log().Debug("command ignored for tabbed layout", "command", cmd)
 		return nil
 	}
+}
+
+// moveStaysInStrip reports whether `move <dir>` on this workspace's focused
+// window would REORDER it among its own siblings, rather than tear it out of
+// the tab strip.
+//
+// Sway's `move` does not stop at the end of a container. When the focused
+// window has no sibling in the requested direction,
+// container_move_in_direction (sway/commands/move.c:301-413) walks up the
+// ancestor chain and PROMOTES the window out of its parent — and when no
+// ancestor is parallel to the direction at all (any vertical move on a tab
+// strip) it first wraps every workspace child in a new container and
+// re-orients the workspace itself. Either way the window lands beside the
+// tabs at half width and the strip is broken; the hub ignores same-workspace
+// window::move events, so nothing puts it back. That is the ws8 report from
+// 2026-08-12, and it is why the last tab moving right is just as destructive
+// as the first tab moving left.
+//
+// So the rule is narrow on purpose: forward only the swap-two-tabs case —
+// the parent is laid out along the move axis AND the neighbour on that side
+// is a WINDOW. Everything else stops at the edge, which is what a tab strip
+// should do. It holds whichever shape the strip has: the workspace container
+// itself tabbed (what ensure builds), or a tabbed container inside the
+// workspace (what a plain `layout tabbed` binding builds).
+//
+// The neighbour must be a window because sway does not swap with a
+// CONTAINER neighbour — container_move_to_container_from_direction reparents
+// the mover INTO it (move.c:140-165), which empties the mover's old slot and
+// leaves the wrapper chain behind. On a healthy strip every neighbour is a
+// window, so this only bites on a workspace whose tree is already nested,
+// where forwarding would deepen the mess rather than reorder a tab.
+//
+// Floating windows are exempt: sway moves them by a pixel delta and never
+// re-parents them, so a floating `move left` cannot break the strip.
+func (t *Tabbed) moveStaysInStrip(ws *sway.Node, dir string) bool {
+	focused := ws.FindFocused()
+	if focused == nil {
+		// The binding named this workspace but focus is elsewhere. A bare
+		// `move` would act on whatever IS focused — never what the user meant.
+		return false
+	}
+	if focused.IsFloating() {
+		return true
+	}
+	// A fullscreen container only moves BETWEEN OUTPUTS, never within the
+	// strip (move.c:305-312).
+	if focused.FullscreenMode != 0 {
+		return false
+	}
+	parent := focused.Parent
+	if parent == nil || !layoutParallelTo(parent.Layout, dir) {
+		return false
+	}
+	for i, sib := range parent.Nodes {
+		if sib != focused {
+			continue
+		}
+		next := i + 1
+		if dir == "left" || dir == "up" {
+			next = i - 1
+		}
+		if next < 0 || next >= len(parent.Nodes) {
+			return false // at the first/last tab: stop here
+		}
+		return len(parent.Nodes[next].Nodes) == 0 // a window, not a container
+	}
+	return false
+}
+
+// layoutParallelTo is sway's is_parallel (sway/commands/move.c:79-91): a
+// tabbed container is laid out horizontally, a stacked one vertically.
+func layoutParallelTo(layout, dir string) bool {
+	switch dir {
+	case "left", "right":
+		return layout == "splith" || layout == "tabbed"
+	case "up", "down":
+		return layout == "splitv" || layout == "stacked"
+	}
+	return false
 }
 
 // tabFlattenMark is the scratch mark used to lift nested leaves to the

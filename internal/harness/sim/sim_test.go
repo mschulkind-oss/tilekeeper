@@ -311,3 +311,125 @@ func itoa(n int64) string {
 	}
 	return string(buf[i:])
 }
+
+// --- directional move: sway's container_move_in_direction ---
+//
+// These pin the behaviors the sim gained when moveDir stopped being
+// intra-parent-only. Real sway does not stop at a container edge: it walks
+// up the ancestor chain and promotes, or re-orients the workspace. The old
+// "silently no-op at the edge" model made a whole class of layout bug
+// (windows escaping a tab strip or a stack column) unreachable by the
+// fuzzer.
+
+// TestMoveDir_PromotesOutOfContainerAtEdge is the ws8 tab-escape shape: a
+// tab strip inside a splith workspace, first tab moved left. Sway promotes
+// it out of the strip so it lands beside the tabs.
+func TestMoveDir_PromotesOutOfContainerAtEdge(t *testing.T) {
+	s, leaves := buildWorkspace(t, "7", 3)
+	ws := leaves[0].FindWorkspace()
+	strip := &sway.Node{ID: 500, Type: "con", Layout: "tabbed", Parent: ws, Nodes: ws.Nodes}
+	for _, c := range strip.Nodes {
+		c.Parent = strip
+	}
+	ws.Nodes = []*sway.Node{strip}
+
+	if err := s.RunCommand("[con_id=" + itoa(leaves[0].ID) + "] move left"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.Nodes) != 2 || ws.Nodes[0] != leaves[0] || ws.Nodes[1] != strip {
+		t.Fatalf("want ws=[leaf, strip] after promotion, got %d children", len(ws.Nodes))
+	}
+	if leaves[0].Parent != ws {
+		t.Fatalf("promoted leaf parent = %v, want the workspace", leaves[0].Parent.ID)
+	}
+	if len(strip.Nodes) != 2 {
+		t.Fatalf("strip kept %d tabs, want 2", len(strip.Nodes))
+	}
+	// sway zeroes the moved container's size fraction; the next arrange
+	// (which the sim leaves to the layout managers) assigns a real share.
+	if leaves[0].Percent != 0 {
+		t.Errorf("promoted leaf percent = %v, want 0", leaves[0].Percent)
+	}
+}
+
+// TestMoveDir_ReorientsWorkspaceWhenPerpendicular covers the other escape
+// route: no ancestor is parallel to the direction, so sway wraps every
+// workspace child in a container, flips the workspace to that axis, and
+// promotes the mover out of the fresh wrapper.
+func TestMoveDir_ReorientsWorkspaceWhenPerpendicular(t *testing.T) {
+	s, leaves := buildWorkspace(t, "7", 3)
+	ws := leaves[0].FindWorkspace()
+	ws.Layout = "tabbed"
+
+	if err := s.RunCommand("[con_id=" + itoa(leaves[1].ID) + "] move up"); err != nil {
+		t.Fatal(err)
+	}
+	if ws.Layout != "splitv" {
+		t.Fatalf("workspace layout = %q, want splitv (re-oriented by the move)", ws.Layout)
+	}
+	if len(ws.Nodes) != 2 || ws.Nodes[0] != leaves[1] {
+		t.Fatalf("want ws=[mover, wrapper], got %d children with first=%v", len(ws.Nodes), ws.Nodes[0].ID)
+	}
+	wrapper := ws.Nodes[1]
+	if wrapper.Layout != "tabbed" || len(wrapper.Nodes) != 2 {
+		t.Fatalf("wrapper = %s with %d children, want tabbed with 2", wrapper.Layout, len(wrapper.Nodes))
+	}
+}
+
+// TestMoveDir_WorkspaceEdgeIsNoOp: a workspace-direct container at the end
+// of a parallel workspace has only "the next output" left to move to, and
+// the sim has a single output.
+func TestMoveDir_WorkspaceEdgeIsNoOp(t *testing.T) {
+	s, leaves := buildWorkspace(t, "7", 3)
+	ws := leaves[0].FindWorkspace()
+	ws.Layout = "splith"
+
+	if err := s.RunCommand("[con_id=" + itoa(leaves[0].ID) + "] move left"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.Nodes) != 3 || ws.Nodes[0] != leaves[0] {
+		t.Fatalf("workspace-edge move should be a no-op, got %d children with first=%v",
+			len(ws.Nodes), ws.Nodes[0].ID)
+	}
+}
+
+// TestMoveDir_EntersParallelNeighborContainer: moving toward a container
+// whose layout runs along the move axis descends INTO it (sway's
+// "Reparenting container (parallel)"), entering from the near end.
+func TestMoveDir_EntersParallelNeighborContainer(t *testing.T) {
+	s, leaves := buildWorkspace(t, "7", 3)
+	ws := leaves[0].FindWorkspace()
+	ws.Layout = "splith"
+	// [leaf0, column(leaf1, leaf2)] with the column laid out horizontally.
+	column := &sway.Node{ID: 500, Type: "con", Layout: "splith", Parent: ws,
+		Nodes: []*sway.Node{leaves[1], leaves[2]}}
+	leaves[1].Parent, leaves[2].Parent = column, column
+	ws.Nodes = []*sway.Node{leaves[0], column}
+
+	if err := s.RunCommand("[con_id=" + itoa(leaves[0].ID) + "] move right"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.Nodes) != 1 || ws.Nodes[0] != column {
+		t.Fatalf("mover should have left the workspace level, got %d children", len(ws.Nodes))
+	}
+	if len(column.Nodes) != 3 || column.Nodes[0] != leaves[0] {
+		t.Fatalf("mover should have entered the column at index 0, got %v children", len(column.Nodes))
+	}
+}
+
+// TestMoveDir_FloatingIsNoOp: floating containers move by pixel delta in
+// sway and never re-parent, so the tree is untouched.
+func TestMoveDir_FloatingIsNoOp(t *testing.T) {
+	s, leaves := buildWorkspace(t, "7", 2)
+	ws := leaves[0].FindWorkspace()
+	float := &sway.Node{ID: 500, Type: "con", Floating: "user_on", Parent: ws}
+	ws.FloatingNodes = []*sway.Node{float}
+
+	if err := s.RunCommand("[con_id=500] move left"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws.FloatingNodes) != 1 || len(ws.Nodes) != 2 {
+		t.Fatalf("floating move should not restructure the tree: tiled=%d floating=%d",
+			len(ws.Nodes), len(ws.FloatingNodes))
+	}
+}

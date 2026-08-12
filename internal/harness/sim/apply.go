@@ -10,6 +10,28 @@ import (
 // apply runs one parsed command against the tree. The caller holds s.mu.
 // Returning a non-nil error causes the command to be recorded as
 // unsupported.
+//
+// KNOWN DIVERGENCE — `[workspace=NAME]` scope.
+//
+// Sway criteria match VIEWS, never containers or workspaces
+// (sway/criteria.c), so `[workspace=8] layout tabbed` runs `layout tabbed`
+// once per WINDOW on ws8. cmd_layout finds no container parent above a
+// workspace-direct window and therefore wraps every workspace child in a
+// NEW tabbed container (workspace_wrap_children); the workspace itself
+// stays splith. The sim instead resolves the scope to the workspace node
+// and sets its layout, producing a flat workspace-level tab strip that real
+// sway never builds.
+//
+// Measured against headless sway on 2026-08-12 — see the
+// workspace-criteria-layout scenario in cmd/sway-difftest, which pins the
+// divergence as a KnownGap.
+//
+// Not corrected here because it is not a sim-only fix: Tabbed.ensure and
+// Tabbed.flattenToTabs are both written against the flat-workspace shape
+// ("every leaf a direct tab child"), which is unreachable in real sway with
+// that command. Modeling it faithfully makes TestTabbedFlatten_ContainerMoveIn
+// fail with genuinely nested tabs — i.e. the sim gap is currently hiding a
+// real Tabbed bug. See docs/handoff-tabbed-workspace-criteria.md.
 func (s *SimSwayClient) apply(scope, verb string, args []string) error {
 	target := s.resolveScope(scope)
 	switch verb {
@@ -451,33 +473,297 @@ func (s *SimSwayClient) cmdMove(target *sway.Node, args []string) error {
 	return fmt.Errorf("move %v", args)
 }
 
+// moveDir implements sway's container_move_in_direction
+// (sway/commands/move.c:301-413) — the primitive behind `move
+// left|right|up|down`.
+//
+// The previous model was INTRA-PARENT ONLY: swap with the adjacent
+// sibling, silently no-op at the parent's edge. That hid a whole bug
+// class, because real sway does not stop at the edge — it walks up the
+// ancestor chain and PROMOTES the container out of its parent (or
+// re-orients the workspace when nothing above is parallel to the
+// direction). Promotion out of a tab strip is exactly the ws8
+// "move left on the first tab pops the window out and it takes half the
+// screen" bug (2026-08-12): with the edge modeled as a no-op, no
+// invariant could ever see it. Two floor justifications in floors.json
+// also blamed this gap ("sim moveDir cannot cross container boundaries")
+// for residual violations.
+//
+// SINGLE-OUTPUT SIM: every "hit the workspace edge" branch in sway ends
+// in container_move_to_next_output, which returns false when there is no
+// output in that direction. Those branches are therefore genuine no-ops
+// here — faithful for a one-output tree, divergent on a multi-head setup.
+//
+// PERCENT: every branch that RE-PARENTS a container zeroes its size
+// fraction in sway (`container->width_fraction = height_fraction = 0`,
+// move.c:340/155/171) and lets the next arrange redistribute. The sim
+// models the zeroing — a promoted container's percent is genuinely
+// unknown until someone resizes it — but not the redistribution, which
+// stays owned by the layout managers (see the floating-toggle KnownGap in
+// cmd/sway-difftest). A plain sibling swap does not re-parent and so does
+// not zero.
 func (s *SimSwayClient) moveDir(target *sway.Node, dir string) error {
-	p := target.Parent
-	if p == nil {
+	if target == nil || target.Parent == nil || target.Type != "con" {
 		return nil
 	}
-	idx := -1
-	for i, c := range p.Nodes {
-		if c == target {
-			idx = i
-			break
+	// A floating container moves by pixel delta (container_floating_move_delta)
+	// and never re-parents; the sim's geometry is advisory, so no-op.
+	if target.IsFloating() {
+		return nil
+	}
+	// FULLSCREEN_WORKSPACE only considers outputs → single-output no-op.
+	if target.FullscreenMode != 0 {
+		return nil
+	}
+
+	offs := 1
+	if dir == "left" || dir == "up" {
+		offs = -1
+	}
+
+	var (
+		ancestor *sway.Node
+		current  = target
+		wrapped  bool
+		index    int
+		moveTo   *sway.Node
+	)
+	// Look for a suitable ancestor of the container to move within.
+	for ancestor == nil {
+		// Containers never escape a fullscreen or floating parent.
+		if current.FullscreenMode != 0 || current.IsFloating() {
+			return nil
+		}
+		if !isParallelDir(parentLayoutOf(current), dir) {
+			if current.Parent.Type == "workspace" {
+				// No parallel parent anywhere above, so sway REORIENTS the
+				// workspace: wrap its children in a container and give the
+				// workspace the axis of the move.
+				ws := current.Parent
+				current = s.wrapWorkspaceChildren(ws)
+				if dir == "left" || dir == "right" {
+					ws.Layout = "splith"
+				} else {
+					ws.Layout = "splitv"
+				}
+				wrapped = true
+				continue
+			}
+			// Keep looking for a parallel parent.
+			current = current.Parent
+			continue
+		}
+		siblings := current.Parent.Nodes
+		index = indexOfNode(siblings, current)
+		if index < 0 {
+			return nil
+		}
+		moveTo = nil
+		if desired := index + offs; desired >= 0 && desired < len(siblings) {
+			moveTo = siblings[desired]
+		}
+		if current == target {
+			if moveTo != nil {
+				// Swap with, or descend into, the neighbor.
+				s.moveToContainerFromDirection(target, moveTo, dir)
+				return nil
+			}
+			if current.Parent.Type == "workspace" {
+				// At workspace level with nowhere to go: next output (none).
+				return nil
+			}
+			// Escaped its immediate parallel parent — keep climbing.
+			current = current.Parent
+			continue
+		}
+		// Found a suitable ancestor; the loop ends.
+		ancestor = current
+	}
+
+	if moveTo != nil {
+		// Move in with the cousin.
+		s.moveToContainerFromDirection(target, moveTo, dir)
+		return nil
+	}
+	// i3 parity (move.c:386-392): a singleton child of a workspace-level
+	// container counts as being AT workspace level, so it goes to the next
+	// output — none here.
+	if !wrapped && target.Parent.Parent != nil &&
+		target.Parent.Parent.Type == "workspace" && len(target.Parent.Nodes) == 1 {
+		return nil
+	}
+
+	// PROMOTION — the container leaves its parent and joins the ancestor's
+	// parent. This is the escape that pops a window out of a tab strip.
+	oldParent := target.Parent
+	insertParent := ancestor.Parent
+	insertIdx := index
+	if offs > 0 {
+		insertIdx = index + 1
+	}
+	// sway inserts BEFORE reaping the emptied old parent, so the index taken
+	// from the ancestor's slot stays valid.
+	detachFromAnyList(target)
+	insertChildAt(insertParent, target, insertIdx)
+	target.Percent = 0
+	s.cascadeFlatten(oldParent)
+	return nil
+}
+
+// moveToContainerFromDirection mirrors sway's
+// container_move_to_container_from_direction (sway/commands/move.c:110-165):
+// how a directional move RESOLVES once a destination is picked.
+//
+// NOT MODELED: the workspace_squash call sway makes after the reparenting
+// branches. container_squash only collapses a singleton pair that is
+// (a) both splith/splitv, (b) perpendicular to each other, and (c) whose
+// child is parallel to the grandparent — a shape none of tilekeeper's
+// managers build (their wrappers are splitv/stacked/tabbed under a splith
+// workspace). Reaping of emptied parents IS modeled, matching the sim's
+// convention everywhere else that a container is detached.
+func (s *SimSwayClient) moveToContainerFromDirection(container, dest *sway.Node, dir string) {
+	// Destination is a view (leaf).
+	if isLeafNode(dest) {
+		if dest.Parent == container.Parent {
+			// Swapping siblings — the common in-strip / in-column reorder.
+			sibs := container.Parent.Nodes
+			i, j := indexOfNode(sibs, container), indexOfNode(sibs, dest)
+			if i >= 0 && j >= 0 {
+				sibs[i], sibs[j] = sibs[j], sibs[i]
+			}
+			return
+		}
+		// Promoting to sibling of cousin.
+		idx := indexOfNode(dest.Parent.Nodes, dest)
+		if dir == "left" || dir == "up" {
+			idx++
+		}
+		s.reparent(container, dest.Parent, idx)
+		return
+	}
+	// Destination is a container laid out along the move axis: enter it
+	// from the far end.
+	if isParallelDir(dest.Layout, dir) {
+		idx := len(dest.Nodes)
+		if dir == "right" || dir == "down" {
+			idx = 0
+		}
+		s.reparent(container, dest, idx)
+		return
+	}
+	// Perpendicular destination: descend into its active child and retry.
+	// Sway picks the destination's focus-inactive child; the sim has no
+	// per-container focus history, so it prefers the child holding the
+	// focused leaf and falls back to the first child — the same
+	// approximation (and divergence) documented on directionalSibling.
+	child := activeTilingChild(dest)
+	if child == nil {
+		// The container has no children.
+		s.reparent(container, dest, len(dest.Nodes))
+		return
+	}
+	s.moveToContainerFromDirection(container, child, dir)
+}
+
+// reparent detaches container and inserts it into parent at idx, reaping
+// the container's now-possibly-empty former ancestry afterwards (sway's
+// container_insert_child detaches; emptied containers are reaped).
+func (s *SimSwayClient) reparent(container, parent *sway.Node, idx int) {
+	oldParent := container.Parent
+	detachFromAnyList(container)
+	insertChildAt(parent, container, idx)
+	container.Percent = 0
+	s.cascadeFlatten(oldParent)
+}
+
+// wrapWorkspaceChildren mirrors workspace_wrap_children
+// (sway/tree/workspace.c:898-910): every workspace child moves into a new
+// container that inherits the workspace's layout, and that container
+// becomes the workspace's only child.
+func (s *SimSwayClient) wrapWorkspaceChildren(ws *sway.Node) *sway.Node {
+	wrapper := &sway.Node{
+		ID:     s.nextID,
+		Type:   "con",
+		Layout: ws.Layout,
+		Parent: ws,
+	}
+	s.nextID++
+	wrapper.Nodes = ws.Nodes
+	for _, c := range wrapper.Nodes {
+		c.Parent = wrapper
+	}
+	ws.Nodes = []*sway.Node{wrapper}
+	return wrapper
+}
+
+// parentLayoutOf is sway's container_parent_layout: the layout of the
+// node's parent container, or of the workspace for a workspace-direct
+// container.
+func parentLayoutOf(n *sway.Node) string {
+	if n.Parent == nil {
+		return ""
+	}
+	return n.Parent.Layout
+}
+
+// isParallelDir is sway's is_parallel(layout, direction)
+// (sway/commands/move.c:79-91): tabbed counts as horizontal, stacked as
+// vertical.
+func isParallelDir(layout, dir string) bool {
+	switch dir {
+	case "left", "right":
+		return layout == "splith" || layout == "tabbed"
+	case "up", "down":
+		return layout == "splitv" || layout == "stacked"
+	}
+	return false
+}
+
+// isLeafNode reports whether n is a view (a container with a window and no
+// children), as opposed to a structural container.
+func isLeafNode(n *sway.Node) bool {
+	return n.Type == "con" && len(n.Nodes) == 0
+}
+
+func indexOfNode(list []*sway.Node, n *sway.Node) int {
+	for i, c := range list {
+		if c == n {
+			return i
 		}
 	}
+	return -1
+}
+
+// insertChildAt inserts child into parent.Nodes at idx (clamped), wiring
+// the parent pointer. Mirrors container_insert_child /
+// workspace_insert_tiling_direct.
+func insertChildAt(parent, child *sway.Node, idx int) {
 	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(parent.Nodes) {
+		idx = len(parent.Nodes)
+	}
+	parent.Nodes = append(parent.Nodes, nil)
+	copy(parent.Nodes[idx+1:], parent.Nodes[idx:])
+	parent.Nodes[idx] = child
+	child.Parent = parent
+}
+
+// activeTilingChild returns the child of n that holds the focused leaf, or
+// the first child when focus lives elsewhere. Approximates sway's
+// seat_get_active_tiling_child (focus history), which the sim does not
+// track.
+func activeTilingChild(n *sway.Node) *sway.Node {
+	if len(n.Nodes) == 0 {
 		return nil
 	}
-	swap := idx
-	switch dir {
-	case "right", "down":
-		swap = idx + 1
-	case "left", "up":
-		swap = idx - 1
+	for _, c := range n.Nodes {
+		if c.FindFocused() != nil {
+			return c
+		}
 	}
-	if swap < 0 || swap >= len(p.Nodes) {
-		return nil
-	}
-	p.Nodes[idx], p.Nodes[swap] = p.Nodes[swap], p.Nodes[idx]
-	return nil
+	return n.Nodes[0]
 }
 
 func (s *SimSwayClient) moveToMark(target *sway.Node, mark string) error {

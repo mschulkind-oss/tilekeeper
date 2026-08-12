@@ -33,6 +33,22 @@ optional target workspace: `… workspace <name>` in a binding, `--workspace
 | `maximize` | toggle fullscreen-maximize of the focused window |
 | `layout <name>` | switch the workspace's layout (`layout none` disables) |
 
+### Tabbed layout
+
+The tabbed layout keeps every window on the workspace in one tab strip and
+otherwise defers to sway, so only the navigation actions mean anything; the
+rest are ignored.
+
+| Action | Meaning |
+|---|---|
+| `focus <left\|right\|up\|down>` | forwarded to sway — left/right cycle tabs |
+| `move <left\|right>` | swap the focused tab with its neighbour; **stops at the first / last tab** |
+| `move <up\|down>` | nothing — a tab strip has no vertical axis |
+
+The stop at the ends is the point: sway's own `move` does not stop there. With
+no neighbour in that direction it pulls the window out of the tab strip
+entirely, leaving it tiled beside the remaining tabs at half width.
+
 ### ProjectTabs layout (session-manager integration)
 
 `toggle-split` and `focus <terminal|browser>` bind like any other action. The

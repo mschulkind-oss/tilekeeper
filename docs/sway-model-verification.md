@@ -223,6 +223,63 @@ Each entry:
 
 ---
 
+## 12. Directional `move` does NOT stop at a container edge
+
+- **Assumption**: `move left|right|up|down` walks up the ancestor chain when
+  the container has no sibling in that direction, and PROMOTES the container
+  out of its parent. If no ancestor is parallel to the direction at all, sway
+  first wraps every workspace child in a new container and flips the
+  workspace to that axis (`workspace_wrap_children`), then promotes. Only a
+  workspace-direct container at the end of a parallel workspace stops — and
+  then only because the "next output" it falls through to does not exist on a
+  single-output machine.
+- **Sim site**: `internal/harness/sim/apply.go` `moveDir` /
+  `moveToContainerFromDirection` / `wrapWorkspaceChildren`.
+- **Sway source**: `sway/commands/move.c:301-413`
+  (`container_move_in_direction`), `:110-165`
+  (`container_move_to_container_from_direction`), `:79-91` (`is_parallel`),
+  `sway/tree/workspace.c:898-910` (`workspace_wrap_children`).
+- **Status**: confirmed live (headless sway, `cmd/sway-difftest`
+  `move-dir-promote-out-of-strip`, `move-dir-reorient-workspace`,
+  `move-dir-interior-swap`).
+- **Notes**: the sim previously modeled this as an intra-parent sibling swap
+  that silently no-opped at the edge. That hid the 2026-08-12 ws8 bug, where
+  `move left` on the first tab tore the window out of the tab strip and left
+  it tiled beside the tabs at half width (fixed by the strip clamp in
+  `layout.Tabbed.moveStaysInStrip`). It also flattered MasterStack: the
+  `move <opposite-of-stack-side>` extraction in `popWindow`/unmaximize is a
+  no-op under the old model and a real extraction under this one, which is
+  why `master-stack-split` fell 12967 → 3785 on the reference sweep.
+  Percents after a promote are zeroed (as sway does) but NOT redistributed —
+  see gap 11; the `move-dir-into-parallel-neighbor` scenario pins that.
+
+---
+
+## 13. `[workspace=N]` criteria match VIEWS, not the workspace (REFUTED)
+
+- **Assumption the sim bakes in**: `[workspace=8] layout tabbed` addresses
+  the workspace container and sets its layout to tabbed, giving a flat
+  workspace-level tab strip.
+- **Reality**: sway criteria only ever match views (`sway/criteria.c`), so the
+  command runs once per WINDOW on ws8. `cmd_layout` finds no container parent
+  above a workspace-direct window and wraps every workspace child in a NEW
+  tabbed container instead; the workspace itself stays `splith`. Real shape:
+  `workspace(splith) > con(tabbed) > windows`.
+- **Sim site**: `internal/harness/sim/apply.go` `apply` (see the KNOWN
+  DIVERGENCE note) via `resolveScope`.
+- **Sway source**: `sway/commands/layout.c:117-199`,
+  `sway/tree/workspace.c:898-910` (`workspace_wrap_children`).
+- **Status**: REFUTED, measured live 2026-08-12 (`cmd/sway-difftest`
+  `workspace-criteria-layout`, tolerated as a KnownGap).
+- **Notes**: this is not a sim-only fix. `Tabbed.ensure` issues exactly this
+  command and `Tabbed.flattenToTabs` then tries to make every leaf a DIRECT
+  child of the workspace — a shape that command cannot produce in sway.
+  Modeling the criteria faithfully turns `TestTabbedFlatten_ContainerMoveIn`
+  red with genuinely nested tabs, i.e. the sim gap is currently hiding a real
+  Tabbed bug. Follow-up: `docs/handoff-tabbed-workspace-criteria.md`.
+
+---
+
 ## Follow-ups
 
 - Trace `move to workspace <self>` to see if sway fires a `window:move`
