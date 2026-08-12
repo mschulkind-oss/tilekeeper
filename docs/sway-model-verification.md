@@ -255,28 +255,30 @@ Each entry:
 
 ---
 
-## 13. `[workspace=N]` criteria match VIEWS, not the workspace (REFUTED)
+## 13. `[workspace=N]` criteria match VIEWS, not the workspace
 
-- **Assumption the sim bakes in**: `[workspace=8] layout tabbed` addresses
-  the workspace container and sets its layout to tabbed, giving a flat
-  workspace-level tab strip.
-- **Reality**: sway criteria only ever match views (`sway/criteria.c`), so the
-  command runs once per WINDOW on ws8. `cmd_layout` finds no container parent
-  above a workspace-direct window and wraps every workspace child in a NEW
-  tabbed container instead; the workspace itself stays `splith`. Real shape:
-  `workspace(splith) > con(tabbed) > windows`.
-- **Sim site**: `internal/harness/sim/apply.go` `apply` (see the KNOWN
-  DIVERGENCE note) via `resolveScope`.
-- **Sway source**: `sway/commands/layout.c:117-199`,
+- **Assumption**: a `[workspace=8] ...` command does NOT address the workspace
+  container. Sway criteria only ever match views (`sway/criteria.c`), so it
+  runs once per WINDOW on ws8. For `layout tabbed` that means `cmd_layout`
+  finds no container parent above a workspace-direct window and wraps every
+  workspace child in a NEW tabbed container; the workspace itself stays
+  `splith`. Real shape: `workspace(splith) > con(tabbed) > windows`. On an
+  empty workspace the command matches nothing and is a silent no-op.
+- **Sim site**: `internal/harness/sim/apply.go` `apply` /
+  `workspaceCriteriaViews`.
+- **Sway source**: `sway/criteria.c`, `sway/commands/layout.c:117-199`,
   `sway/tree/workspace.c:898-910` (`workspace_wrap_children`).
-- **Status**: REFUTED, measured live 2026-08-12 (`cmd/sway-difftest`
-  `workspace-criteria-layout`, tolerated as a KnownGap).
-- **Notes**: this is not a sim-only fix. `Tabbed.ensure` issues exactly this
-  command and `Tabbed.flattenToTabs` then tries to make every leaf a DIRECT
-  child of the workspace — a shape that command cannot produce in sway.
-  Modeling the criteria faithfully turns `TestTabbedFlatten_ContainerMoveIn`
-  red with genuinely nested tabs, i.e. the sim gap is currently hiding a real
-  Tabbed bug. Follow-up: `docs/handoff-tabbed-workspace-criteria.md`.
+- **Status**: confirmed live 2026-08-12 (`cmd/sway-difftest`
+  `workspace-criteria-layout`). Sim corrected to match.
+- **Notes**: the sim previously resolved this scope to the workspace node and
+  set its layout, modeling a flat workspace-level tab strip that sway never
+  builds — and `Tabbed` was written against exactly that shape: `ensure`
+  issued the workspace-scoped command and `flattenToTabs` then tried to lift
+  every window to workspace level, which could not succeed and, worse, could
+  not even find an anchor once everything had been wrapped. Correcting the
+  sim alone turns `TestTabbedFlatten_ContainerMoveIn` red with genuinely
+  nested tabs, so the two landed together: Tabbed now builds and maintains
+  the strip container by con id (`repair`: gather → tab → lift → wrap).
 
 ---
 

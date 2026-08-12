@@ -1,21 +1,46 @@
 package layout
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/mschulkind-oss/tilekeeper/internal/sway"
 )
 
-func TestTabbedSetsLayoutOnArrange(t *testing.T) {
+// The strip is a CONTAINER, not the workspace: `[workspace=N] layout tabbed`
+// matches views, so sway runs it per window and wraps the workspace children
+// in a tabbed container rather than tabbing the workspace. ensure therefore
+// scopes its commands to a window id and builds that container itself.
+// See docs/sway-model-verification.md §13.
+func TestTabbedWrapsWindowsIntoStripOnArrange(t *testing.T) {
 	mock := sway.NewMock()
 	tb := NewTabbed(mock)
-	ws := &sway.Node{ID: 1, Type: "workspace", Name: "8", Layout: "splith"}
+	ws := workspaceTree("8", "splith", 2)
+	mock.Tree = rootOf(ws)
 
 	if err := tb.ArrangeAll(ws); err != nil {
 		t.Fatalf("ArrangeAll: %v", err)
 	}
-	if !mock.HasCommand(`[workspace=8] layout tabbed`) {
-		t.Errorf("expected `[workspace=8] layout tabbed`, got %v", mock.Commands)
+	want := "[con_id=100] layout tabbed"
+	if !mock.HasCommand(want) {
+		t.Errorf("expected %q to wrap the windows into a strip, got %v", want, mock.Commands)
+	}
+	if mock.HasCommand("[workspace=8] layout tabbed") {
+		t.Errorf("workspace-scoped layout does not tab the workspace; got %v", mock.Commands)
+	}
+}
+
+func TestTabbedNoOpWhenStripHealthy(t *testing.T) {
+	mock := sway.NewMock()
+	tb := NewTabbed(mock)
+	ws, _ := stripTree("8", 3)
+	mock.Tree = rootOf(ws)
+
+	if err := tb.ArrangeAll(ws); err != nil {
+		t.Fatalf("ArrangeAll: %v", err)
+	}
+	if mock.CommandCount() != 0 {
+		t.Errorf("expected no commands for a healthy strip, got %v", mock.Commands)
 	}
 }
 
@@ -32,18 +57,119 @@ func TestTabbedNoOpWhenAlreadyTabbed(t *testing.T) {
 	}
 }
 
-func TestTabbedWindowAddedSetsLayout(t *testing.T) {
+func TestTabbedWindowAddedWrapsIntoStrip(t *testing.T) {
 	mock := sway.NewMock()
 	tb := NewTabbed(mock)
-	ws := &sway.Node{ID: 1, Type: "workspace", Name: "8", Layout: "splith"}
-	win := &sway.Node{ID: 100, Type: "con", Parent: ws}
+	ws := workspaceTree("8", "splith", 1)
+	mock.Tree = rootOf(ws)
 
-	if err := tb.WindowAdded(ws, win); err != nil {
+	if err := tb.WindowAdded(ws, ws.Nodes[0]); err != nil {
 		t.Fatalf("WindowAdded: %v", err)
 	}
-	if !mock.HasCommand(`[workspace=8] layout tabbed`) {
-		t.Errorf("expected layout tabbed command on window-added, got %v", mock.Commands)
+	if !mock.HasCommand("[con_id=100] layout tabbed") {
+		t.Errorf("expected the new window to be wrapped into a strip, got %v", mock.Commands)
 	}
+}
+
+// TestTabbedGathersStrayIntoStrip: a window that arrives while focus is
+// outside the strip lands BESIDE it. ensure must pull it in rather than tab
+// the pair — the latter builds a second strip around the first (nested tabs),
+// which is what the old workspace-scoped command did.
+func TestTabbedGathersStrayIntoStrip(t *testing.T) {
+	mock := sway.NewMock()
+	tb := NewTabbed(mock)
+	ws, strip := stripTree("8", 2)
+	stray := &sway.Node{ID: 200, Type: "con", Parent: ws}
+	ws.Nodes = append(ws.Nodes, stray)
+	mock.Tree = rootOf(ws)
+
+	if err := tb.ArrangeAll(ws); err != nil {
+		t.Fatalf("ArrangeAll: %v", err)
+	}
+	anchor := strip.Nodes[len(strip.Nodes)-1].ID
+	for _, want := range []string{
+		fmt.Sprintf("[con_id=%d] mark --add tk_tab_gather", anchor),
+		"[con_id=200] move window to mark tk_tab_gather",
+		fmt.Sprintf("[con_id=%d] unmark tk_tab_gather", anchor),
+	} {
+		if !mock.HasCommand(want) {
+			t.Errorf("expected %q, got %v", want, mock.Commands)
+		}
+	}
+}
+
+// TestTabbedLiftsStripToWorkspaceLevel: a strip left nested under a singleton
+// wrapper (e.g. a container move dropped a subtree in) is flattened back to
+// the workspace's only tiled child.
+func TestTabbedLiftsStripToWorkspaceLevel(t *testing.T) {
+	mock := sway.NewMock()
+	tb := NewTabbed(mock)
+	ws, strip := stripTree("8", 2)
+	wrapper := &sway.Node{ID: 300, Type: "con", Layout: "splitv", Parent: ws,
+		Nodes: []*sway.Node{strip}}
+	strip.Parent = wrapper
+	ws.Nodes = []*sway.Node{wrapper}
+	mock.Tree = rootOf(ws)
+
+	if err := tb.ArrangeAll(ws); err != nil {
+		t.Fatalf("ArrangeAll: %v", err)
+	}
+	want := fmt.Sprintf("[con_id=%d] split none", strip.ID)
+	if !mock.HasCommand(want) {
+		t.Errorf("expected %q to lift the strip, got %v", want, mock.Commands)
+	}
+}
+
+// TestTabbedRebuildsStripOnWindowRemoved: a strip can dissolve without any
+// window being added — sway reaps it when the last tab leaves, and a
+// `split none` aimed at a stale con id (another workspace's manager still
+// tracking a window that moved here) collapses a one-tab strip into a bare
+// workspace-direct window. The fuzzer reproduces exactly that. Repairing on
+// removal means the tab bar comes back at the next close instead of waiting
+// for the next window to open.
+func TestTabbedRebuildsStripOnWindowRemoved(t *testing.T) {
+	mock := sway.NewMock()
+	tb := NewTabbed(mock)
+	ws := workspaceTree("8", "splith", 1) // strip already collapsed
+	mock.Tree = rootOf(ws)
+
+	if err := tb.WindowRemoved(ws, &sway.Node{ID: 999, Type: "con"}); err != nil {
+		t.Fatalf("WindowRemoved: %v", err)
+	}
+	if !mock.HasCommand("[con_id=100] layout tabbed") {
+		t.Errorf("expected the strip to be rebuilt on removal, got %v", mock.Commands)
+	}
+}
+
+// workspaceTree builds a workspace with n workspace-direct windows.
+func workspaceTree(name, layout string, n int) *sway.Node {
+	ws := &sway.Node{ID: 1, Type: "workspace", Name: name, Layout: layout}
+	for i := range n {
+		ws.Nodes = append(ws.Nodes,
+			&sway.Node{ID: int64(100 + i), Type: "con", Parent: ws})
+	}
+	return ws
+}
+
+// stripTree builds the shape Tabbed maintains: workspace(splith) with one
+// tabbed container holding n windows.
+func stripTree(name string, n int) (ws, strip *sway.Node) {
+	ws = &sway.Node{ID: 1, Type: "workspace", Name: name, Layout: "splith"}
+	strip = &sway.Node{ID: 2, Type: "con", Layout: "tabbed", Parent: ws}
+	for i := range n {
+		strip.Nodes = append(strip.Nodes,
+			&sway.Node{ID: int64(100 + i), Type: "con", Parent: strip})
+	}
+	ws.Nodes = []*sway.Node{strip}
+	return ws, strip
+}
+
+// rootOf wraps a workspace in the output/root scaffolding GetTree returns.
+func rootOf(ws *sway.Node) *sway.Node {
+	output := &sway.Node{ID: 10, Type: "output", Name: "eDP-1", Nodes: []*sway.Node{ws}}
+	root := &sway.Node{ID: 9, Type: "root", Nodes: []*sway.Node{output}}
+	root.SetParents()
+	return root
 }
 
 func TestTabbedCommandIsNoOp(t *testing.T) {

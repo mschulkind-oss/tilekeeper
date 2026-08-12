@@ -181,19 +181,11 @@ func AllScenarios() []Scenario {
 		{
 			Name:    "workspace-criteria-layout",
 			Windows: 3,
-			Why: "`[workspace=N] layout tabbed` — the command Tabbed.ensure issues. " +
-				"Sway criteria match VIEWS, so this runs per-window and wraps the " +
-				"workspace children in a tabbed CONTAINER; it does not tab the " +
-				"workspace container itself.",
-			KnownGap: "The sim resolves a [workspace=N] scope to the workspace NODE " +
-				"and sets its layout, so it builds a flat workspace-level tab strip " +
-				"where sway builds workspace(splith) > con(tabbed) > windows. Left " +
-				"unmodeled deliberately: Tabbed.ensure and Tabbed.flattenToTabs are " +
-				"written against the flat shape (\"every leaf a direct tab child\"), " +
-				"which that command cannot produce in real sway, so modeling it " +
-				"faithfully turns TestTabbedFlatten_ContainerMoveIn red with nested " +
-				"tabs — the sim gap is hiding a real Tabbed bug. Fixing both together " +
-				"is the follow-up in docs/handoff-tabbed-workspace-criteria.md.",
+			Why: "`[workspace=N] layout tabbed` — sway criteria match VIEWS, so this " +
+				"runs per-window and wraps the workspace children in a tabbed " +
+				"CONTAINER; it does not tab the workspace container itself. Tabbed " +
+				"used to issue exactly this and then try to lift every window to " +
+				"workspace level, a shape it can never produce.",
 			Commands: []string{
 				"[workspace=7] layout tabbed",
 			},

@@ -3,6 +3,7 @@ package sim
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/mschulkind-oss/tilekeeper/internal/sway"
 )
@@ -11,29 +12,53 @@ import (
 // Returning a non-nil error causes the command to be recorded as
 // unsupported.
 //
-// KNOWN DIVERGENCE — `[workspace=NAME]` scope.
+// `[workspace=NAME]` SCOPE: sway criteria match VIEWS, never containers and
+// never workspaces (sway/criteria.c), so `[workspace=8] layout tabbed` does
+// not address the workspace container — it runs `layout tabbed` once per
+// WINDOW on ws8. cmd_layout, finding no container parent above a
+// workspace-direct window, then wraps every workspace child in a NEW tabbed
+// container (workspace_wrap_children) and the workspace itself stays splith.
 //
-// Sway criteria match VIEWS, never containers or workspaces
-// (sway/criteria.c), so `[workspace=8] layout tabbed` runs `layout tabbed`
-// once per WINDOW on ws8. cmd_layout finds no container parent above a
-// workspace-direct window and therefore wraps every workspace child in a
-// NEW tabbed container (workspace_wrap_children); the workspace itself
-// stays splith. The sim instead resolves the scope to the workspace node
-// and sets its layout, producing a flat workspace-level tab strip that real
-// sway never builds.
+// The sim used to resolve this scope to the workspace node and set its
+// layout, modeling a flat workspace-level tab strip that real sway never
+// builds. That flattered Tabbed, whose ensure/flatten pair was written
+// against exactly that unreachable shape. Corrected 2026-08-12 together with
+// the Tabbed rework; pinned by the workspace-criteria-layout scenario in
+// cmd/sway-difftest and documented in docs/sway-model-verification.md §13.
 //
-// Measured against headless sway on 2026-08-12 — see the
-// workspace-criteria-layout scenario in cmd/sway-difftest, which pins the
-// divergence as a KnownGap.
-//
-// Not corrected here because it is not a sim-only fix: Tabbed.ensure and
-// Tabbed.flattenToTabs are both written against the flat-workspace shape
-// ("every leaf a direct tab child"), which is unreachable in real sway with
-// that command. Modeling it faithfully makes TestTabbedFlatten_ContainerMoveIn
-// fail with genuinely nested tabs — i.e. the sim gap is currently hiding a
-// real Tabbed bug. See docs/handoff-tabbed-workspace-criteria.md.
+// An empty workspace matches no views, so the command is a silent no-op —
+// also faithful.
 func (s *SimSwayClient) apply(scope, verb string, args []string) error {
-	target := s.resolveScope(scope)
+	if views, ok := s.workspaceCriteriaViews(scope); ok {
+		for _, view := range views {
+			if err := s.applyTo(view, verb, args); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return s.applyTo(s.resolveScope(scope), verb, args)
+}
+
+// workspaceCriteriaViews expands a `[workspace=NAME]` scope into the views it
+// matches, in tree order (tiled then floating). ok is false for every other
+// scope shape, which resolves to a single node as before.
+func (s *SimSwayClient) workspaceCriteriaViews(scope string) ([]*sway.Node, bool) {
+	if !strings.HasPrefix(scope, "[workspace=") {
+		return nil, false
+	}
+	ws := s.resolveScope(scope)
+	if ws == nil || ws.Type != "workspace" {
+		return nil, true // criteria matched nothing: no views, no commands
+	}
+	views := append([]*sway.Node(nil), ws.Leaves()...)
+	for _, f := range ws.FloatingNodes {
+		views = append(views, f.Leaves()...)
+	}
+	return views, true
+}
+
+func (s *SimSwayClient) applyTo(target *sway.Node, verb string, args []string) error {
 	switch verb {
 	case "split":
 		return s.cmdSplit(target, args)

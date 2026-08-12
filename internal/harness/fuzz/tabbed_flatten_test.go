@@ -25,22 +25,22 @@ func newTabbedPlusMasterHub(s *sim.SimSwayClient) *workspace.Hub {
 	return hub
 }
 
-// nestedConCount returns the number of non-leaf "con" containers under ws.
-// A correctly-flattened tabbed workspace has ZERO — every leaf is a direct
-// tab child.
-func nestedConCount(ws *sway.Node) int {
-	n := 0
+// nestedConCount returns the number of non-leaf "con" containers under n.
+// A correctly-flattened tab strip has ZERO below it — every window is a
+// direct tab.
+func nestedConCount(n *sway.Node) int {
+	count := 0
 	var walk func(node *sway.Node)
 	walk = func(node *sway.Node) {
 		for _, c := range node.Nodes {
 			if c.Type == "con" && len(c.Nodes) > 0 {
-				n++
+				count++
 			}
 			walk(c)
 		}
 	}
-	walk(ws)
-	return n
+	walk(n)
+	return count
 }
 
 // TestTabbedFlatten_ContainerMoveIn pins the follow-up the container-move
@@ -50,8 +50,13 @@ func nestedConCount(ws *sway.Node) int {
 // once the workspace was already tabbed, so the nesting persisted and
 // fired the no-wrapper-chain invariant.
 //
-// After the fix every moved window is a direct tab child: no nested
-// containers, no singleton wrapper chain.
+// After the fix every moved window is a direct tab of the STRIP: one tabbed
+// container, sitting alone under the workspace, with no nesting below it.
+// (The assertions used to demand the windows be direct children of the
+// WORKSPACE. That shape was an artifact of the sim resolving
+// `[workspace=N]` to the workspace node — real sway wraps the windows in a
+// container instead, so the old expectation could never hold in production.
+// See docs/sway-model-verification.md §13.)
 func TestTabbedFlatten_ContainerMoveIn(t *testing.T) {
 	s := sim.New()
 	hub := newTabbedPlusMasterHub(s)
@@ -94,17 +99,16 @@ func TestTabbedFlatten_ContainerMoveIn(t *testing.T) {
 	t.Log("ws8 after container move-in:")
 	dumpTree(t, ws8Node)
 
-	// Every leaf (3 original + 4 moved) must be a direct child of ws8.
+	// Every leaf (3 original + 4 moved) must be a direct tab of the strip.
 	if got := len(ws8Node.Leaves()); got != 7 {
 		t.Errorf("ws8 has %d leaves, want 7", got)
 	}
-	if n := nestedConCount(ws8Node); n != 0 {
-		t.Errorf("ws8 has %d nested containers, want 0 (flat tabs)\n%s", n, dumpTreeStr(tree))
+	strip := tabStripOf(t, s, "8")
+	if n := nestedConCount(strip); n != 0 {
+		t.Errorf("strip has %d nested containers, want 0 (flat tabs)\n%s", n, dumpTreeStr(tree))
 	}
-	for _, l := range ws8Node.Leaves() {
-		if l.Parent != ws8Node {
-			t.Errorf("leaf %d is not a direct tab child (parent=%d)", l.ID, l.Parent.ID)
-		}
+	if got := len(strip.Nodes); got != 7 {
+		t.Errorf("strip has %d tabs, want 7\n%s", got, dumpTreeStr(tree))
 	}
 	if depth, path := longestSingletonChain(tree); depth > 1 {
 		t.Errorf("singleton chain depth=%d path=%s\n%s", depth, path, dumpTreeStr(tree))

@@ -574,31 +574,67 @@ func checkMasterWidthHonored(hub *workspace.Hub, s *sim.SimSwayClient, wsNames [
 		// mask a real regression. A real width regression keeps the healthy
 		// 2-child splith and reports under master-width-honored.
 		invName := "master-width-honored"
-		if masterSharesParentWithStack(wsNode, master, ids) {
+		if masterRowDegenerate(wsNode, master, ids, ms.Config().MasterCount) {
 			invName = "master-width-degenerate"
+		}
+		siblings := 0
+		if master.Parent != nil {
+			siblings = len(master.Parent.Nodes)
 		}
 		res.Violations = append(res.Violations, Violation{
 			Invariant: invName,
 			Step:      step,
 			Event:     ev,
-			Detail: fmt.Sprintf("workspace=%s master_id=%d got=%.3f want=%.3f tolerance=%.3f",
-				name, master.ID, got, want, tolerance),
+			Detail: fmt.Sprintf("workspace=%s master_id=%d got=%.3f want=%.3f tolerance=%.3f row=%d",
+				name, master.ID, got, want, tolerance, siblings),
 		})
 	}
 }
 
-// masterSharesParentWithStack reports whether master's direct parent also
-// directly contains any of the tracked stack windows (ids[1:]). When true,
-// the canonical master/stack-column split is missing (master-stack-split's
-// bug shape), so the master's width is not a meaningful signal — see the
-// split rationale on checkMasterWidthHonored.
-func masterSharesParentWithStack(wsNode, master *sway.Node, ids []int64) bool {
+// masterRowDegenerate reports whether the master's row is too broken for its
+// width to mean anything. The healthy row is exactly the masters plus the
+// stack column: `splith[master…, stack-column]`. Two ways it degenerates, and
+// both send the violation to master-width-degenerate instead of the real-bug
+// class:
+//
+//   - a tracked STACK window shares the master's parent, i.e. the stack
+//     column is missing — the master-stack-split bug shape;
+//   - the row holds any other WINDOW the manager does not count as a master.
+//     A `resize set width 75 ppt` is then split across a crowd, and the sim
+//     clamps every other child to a 1% minimum, so the master cannot reach
+//     75% at all once the row exceeds ~26 children (the tell is a `got` of
+//     exactly 1 - 0.01*(row-1)). That crowd is itself the bug; the width is
+//     noise on top of it.
+//
+// The second rule is what keeps the real class honest once a workspace has
+// been through a foreign layout: a tabbed strip that later becomes a
+// MasterStack workspace leaves every window in one row, and the manager
+// tracks only the few it adopted — so the first rule alone reads "healthy".
+func masterRowDegenerate(wsNode, master *sway.Node, ids []int64, masterCount int) bool {
 	if master.Parent == nil {
 		return false
 	}
-	for _, sid := range ids[1:] {
+	if masterCount < 1 {
+		masterCount = 1
+	}
+	if masterCount > len(ids) {
+		masterCount = len(ids)
+	}
+	for _, sid := range ids[masterCount:] {
 		sn := wsNode.FindByID(sid)
 		if sn != nil && sn.Parent == master.Parent {
+			return true
+		}
+	}
+	masters := map[int64]struct{}{}
+	for _, id := range ids[:masterCount] {
+		masters[id] = struct{}{}
+	}
+	for _, sib := range master.Parent.Nodes {
+		if len(sib.Nodes) > 0 {
+			continue // a container: the stack column (or a wrapper around it)
+		}
+		if _, ok := masters[sib.ID]; !ok {
 			return true
 		}
 	}
@@ -843,13 +879,12 @@ func checkMaximizedFoldIntact(hub *workspace.Hub, s *sim.SimSwayClient, wsNames 
 //   - the workspace has exactly one tiled child, a tabbed container, and
 //     every leaf is a direct child of THAT.
 //
-// The second shape is what real sway builds for tilekeeper's own
-// `[workspace=N] layout tabbed` (criteria match views, so cmd_layout wraps
-// the workspace children — see the KNOWN DIVERGENCE note on sim.apply and
-// docs/handoff-tabbed-workspace-criteria.md). The sim currently produces the
-// first. Accepting both keeps this invariant true of production rather than
-// of one harness's model, and it catches the same bugs either way: a window
-// tiled BESIDE the strip, or tabs nested inside tabs.
+// The second shape is the one Tabbed builds and maintains, because it is the
+// only one `layout tabbed` can produce (docs/sway-model-verification.md §13).
+// The first is still accepted: a workspace whose container is tabbed by
+// sway's own workspace_layout is just as much a single strip. Either way this
+// catches the same two bugs — a window tiled BESIDE the strip, or tabs nested
+// inside tabs.
 //
 // This is the invariant the ws8 "move left on the first tab pops the window
 // out of the strip and it takes half the screen" bug (2026-08-12) violates.

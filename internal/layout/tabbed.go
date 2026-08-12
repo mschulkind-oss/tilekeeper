@@ -53,11 +53,16 @@ func (t *Tabbed) WindowAdded(ws *sway.Node, win *sway.Node) error {
 	return t.ensure(ws)
 }
 
-func (t *Tabbed) WindowRemoved(_ *sway.Node, win *sway.Node) error {
+// WindowRemoved re-establishes the strip. Losing a window can dissolve it:
+// sway reaps the container when the last tab leaves, and a `split none` from
+// elsewhere (e.g. FlattenSingletons during a layout switch) collapses a
+// one-tab strip into a bare workspace-direct window — leaving the workspace
+// with no tab bar at all until the next window happens to open.
+func (t *Tabbed) WindowRemoved(ws *sway.Node, win *sway.Node) error {
 	if win != nil {
 		t.log().Debug("window removed", "con_id", win.ID, "name", win.Name)
 	}
-	return nil
+	return t.ensure(ws)
 }
 
 func (t *Tabbed) WindowFocused(_ *sway.Node, win *sway.Node) error {
@@ -193,18 +198,33 @@ func layoutParallelTo(layout, dir string) bool {
 	return false
 }
 
-// tabFlattenMark is the scratch mark used to lift nested leaves to the
-// workspace level. Scoped to one ensure() call (added then removed).
-const tabFlattenMark = "tk_tab_flatten"
+// tabGatherMark is the scratch mark used to pull a stray window into the
+// strip. Scoped to one move (added, used, removed).
+const tabGatherMark = "tk_tab_gather"
 
-// ensure makes the workspace tabbed AND flat: every leaf a direct tab
-// child. `layout tabbed` alone does not collapse nested containers, so a
-// container move that dumps a MasterStack subtree (splitv/stacked
-// wrappers) onto a tabbed workspace leaves the windows nested inside the
-// tabs — the no-wrapper-chain invariant fires and the user sees nested
-// tabs instead of a flat tab strip. The old ensure() also early-returned
-// once the workspace was already tabbed, so the nesting was never
-// repaired on subsequent move-ins.
+// maxEnsureRounds bounds the repair loop. Each round issues commands only
+// when it changed something, so a healthy workspace costs one tree read.
+const maxEnsureRounds = 8
+
+// ensure drives the workspace toward its one defining shape: every tiled
+// window is a tab in ONE strip, and that strip is the workspace's only tiled
+// child.
+//
+// THE STRIP IS A CONTAINER, NOT THE WORKSPACE. `[workspace=N] layout tabbed`
+// — what this used to issue — does not tab the workspace container at all:
+// sway criteria match views (sway/criteria.c), so it runs `layout tabbed`
+// once per window, and cmd_layout, finding no container parent above a
+// workspace-direct window, wraps every workspace child in a new tabbed
+// container instead. The workspace stays splith. So the old pair of
+// "workspace layout tabbed" + "lift every leaf to workspace level" was
+// chasing a shape sway will not build, and the lift step could not even find
+// an anchor once every leaf had been wrapped. Verified against headless sway
+// (cmd/sway-difftest workspace-criteria-layout); see
+// docs/sway-model-verification.md §13.
+//
+// A workspace whose CONTAINER is genuinely tabbed (sway's workspace_layout,
+// or a user command) is also a valid strip and is left as one — chooseStrip
+// returns the workspace itself in that case.
 func (t *Tabbed) ensure(ws *sway.Node) error {
 	if ws == nil {
 		return nil
@@ -212,73 +232,194 @@ func (t *Tabbed) ensure(ws *sway.Node) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Set the workspace layout from the caller's node — no tree round-trip,
-	// so this works with the command-recording mock and matches the prior
-	// behavior exactly for the common "freshly-tabbed" case.
-	if ws.Layout != "tabbed" {
-		t.log().Info("ensure: setting workspace layout to tabbed",
-			"workspace", ws.Name, "was", ws.Layout)
-		if err := t.conn.RunCommand(fmt.Sprintf("[workspace=%s] layout tabbed", ws.Name)); err != nil {
-			return err
-		}
-	}
-	// Flatten any nested wrappers to flat tabs. Runs even when already
-	// tabbed (the old early-return was the bug) — a no-op on a tree that's
-	// already flat, and silently skipped when no tree is available (mock).
-	return t.flattenToTabs(ws.Name)
-}
-
-// flattenToTabs lifts every nested leaf to the workspace level so the
-// tabbed workspace is a flat tab strip.
-//
-// Lift strategy: mark a workspace-direct leaf and `move window to mark`
-// every nested leaf onto it — sway re-parents the moved leaf as a sibling
-// of the mark target, i.e. a workspace-direct tab. Emptied wrappers are
-// reaped by sway. Re-fetch each round since the tree mutates; bounded so a
-// pathological tree can't loop forever.
-func (t *Tabbed) flattenToTabs(wsName string) error {
-	for round := 0; round < 8; round++ {
-		ws := t.freshWorkspace(wsName)
-		if ws == nil {
-			return nil
-		}
-		var anchor *sway.Node
-		var nested []*sway.Node
-		for _, leaf := range ws.Leaves() {
-			if leaf.Parent == ws {
-				if anchor == nil {
-					anchor = leaf
-				}
-			} else {
-				nested = append(nested, leaf)
-			}
-		}
-		if len(nested) == 0 {
-			return nil // already flat
-		}
-		if anchor == nil {
-			// No workspace-direct leaf to anchor against. Collapse singleton
-			// wrappers to expose one and retry; if that makes no progress
-			// (rare all-nested multi-child shape, which the no-wrapper-chain
-			// invariant does not flag anyway) bail rather than spin.
-			before := len(ws.Nodes)
-			FlattenSingletons(t.conn, ws)
-			if after := t.freshWorkspace(wsName); after == nil || len(after.Nodes) == before {
-				t.log().Debug("flatten: no anchor and no singleton progress",
-					"workspace", wsName, "nested", len(nested))
+	name := ws.Name
+	lastShape := ""
+	for round := range maxEnsureRounds {
+		// Work from a fresh tree — every repair below mutates it. Fall back to
+		// the caller's node once (command-recording mocks have no tree), which
+		// is enough to emit the first repair.
+		target := t.freshWorkspace(name)
+		if target == nil {
+			if round > 0 {
 				return nil
 			}
+			target = ws
+		}
+		// Stop if the previous round's repair did not actually move the tree.
+		// Real sway can refuse a command (or a racing event can undo it), and
+		// re-issuing the same repair eight times would turn one failure into a
+		// command storm.
+		if shape := shapeSig(target); shape == lastShape {
+			t.log().Debug("ensure: repair made no progress, stopping",
+				"workspace", name, "round", round)
+			return nil
+		} else {
+			lastShape = shape
+		}
+		changed, err := t.repair(target)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+	}
+	t.log().Warn("ensure: workspace did not converge to a flat tab strip",
+		"workspace", name, "rounds", maxEnsureRounds)
+	return nil
+}
+
+// repair performs at most ONE repair on the workspace and reports whether it
+// changed anything. ensure re-reads the tree and calls it again until it
+// reports clean, so each step reasons about a real tree rather than a
+// predicted one.
+//
+// The repairs, in order:
+//
+//  1. gather — pull every window that is not a direct child of the strip
+//     into it, so all tabs live in one container.
+//  2. tab — give the strip the tabbed layout.
+//  3. lift — collapse any wrapper chain between the strip and the workspace.
+//  4. wrap — when the tabs are still workspace-direct children of a
+//     non-tabbed workspace, wrap them into a strip container.
+func (t *Tabbed) repair(ws *sway.Node) (bool, error) {
+	leaves := ws.Leaves()
+	if len(leaves) == 0 {
+		return false, nil
+	}
+	strip := chooseStrip(ws, leaves)
+
+	// 1. gather.
+	if anchor, strays := straysOutside(strip, leaves); len(strays) > 0 {
+		t.log().Debug("ensure: gathering windows into the tab strip",
+			"workspace", ws.Name, "strip", strip.ID, "anchor", anchor.ID, "strays", len(strays))
+		for _, stray := range strays {
+			// Re-mark on the window just placed so strays keep their relative
+			// order: `move window to mark` inserts as the mark's NEXT sibling.
+			t.runCmd("[con_id=%d] mark --add %s", anchor.ID, tabGatherMark)
+			t.runCmd("[con_id=%d] move window to mark %s", stray.ID, tabGatherMark)
+			t.runCmd("[con_id=%d] unmark %s", anchor.ID, tabGatherMark)
+			anchor = stray
+		}
+		return true, nil
+	}
+
+	// 2. tab. Scoped to a window inside the strip: cmd_layout re-layouts that
+	// window's PARENT, which is the strip.
+	if strip != ws && strip.Layout != "tabbed" {
+		t.log().Info("ensure: tabbing the strip",
+			"workspace", ws.Name, "strip", strip.ID, "was", strip.Layout)
+		t.runCmd("[con_id=%d] layout tabbed", leaves[0].ID)
+		return true, nil
+	}
+
+	// 3. lift. `split none` collapses the whole singleton chain above the
+	// strip in one call (container_flatten loops); sway rejects it when the
+	// strip's parent has siblings, so only issue it when it is a singleton —
+	// gather will have emptied the siblings by then anyway.
+	if strip != ws && strip.Parent != nil && strip.Parent != ws && len(strip.Parent.Nodes) == 1 {
+		t.log().Debug("ensure: lifting the strip to workspace level",
+			"workspace", ws.Name, "strip", strip.ID, "wrapper", strip.Parent.ID)
+		t.runCmd("[con_id=%d] split none", strip.ID)
+		return true, nil
+	}
+
+	// 4. wrap. The windows are workspace-direct and the workspace container is
+	// not itself tabbed, so there is no strip yet: `layout tabbed` on a
+	// workspace-direct window wraps them all into one (workspace_wrap_children).
+	if strip == ws && ws.Layout != "tabbed" {
+		t.log().Info("ensure: wrapping workspace windows into a tab strip",
+			"workspace", ws.Name, "windows", len(leaves))
+		t.runCmd("[con_id=%d] layout tabbed", leaves[0].ID)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// chooseStrip picks the container that should hold the tabs:
+//
+//   - the workspace container itself when it is already tabbed (or stacked —
+//     a stacked workspace is the same strip drawn vertically);
+//   - otherwise the workspace-direct tabbed container holding the most
+//     windows, so an existing strip wins over a stray wrapper;
+//   - otherwise the first window's parent, which repair tabs and lifts. When
+//     that parent IS the workspace, repair wraps instead.
+//
+// Never nil: leaves is non-empty and every leaf has a parent.
+func chooseStrip(ws *sway.Node, leaves []*sway.Node) *sway.Node {
+	if ws.Layout == "tabbed" || ws.Layout == "stacked" {
+		return ws
+	}
+	var best *sway.Node
+	bestCount := 0
+	for _, child := range ws.Nodes {
+		if child.Type != "con" || len(child.Nodes) == 0 {
 			continue
 		}
-		t.log().Debug("flatten: lifting nested leaves to tabs",
-			"workspace", wsName, "anchor", anchor.ID, "nested", len(nested))
-		t.conn.RunCommand(fmt.Sprintf("[con_id=%d] mark --add %s", anchor.ID, tabFlattenMark))
-		for _, leaf := range nested {
-			t.conn.RunCommand(fmt.Sprintf("[con_id=%d] move window to mark %s", leaf.ID, tabFlattenMark))
+		if child.Layout != "tabbed" && child.Layout != "stacked" {
+			continue
 		}
-		t.conn.RunCommand(fmt.Sprintf("[con_id=%d] unmark %s", anchor.ID, tabFlattenMark))
+		if n := len(child.Leaves()); n > bestCount {
+			best, bestCount = child, n
+		}
 	}
-	return nil
+	if best != nil {
+		return best
+	}
+	if p := leaves[0].Parent; p != nil {
+		return p
+	}
+	return ws
+}
+
+// straysOutside returns an anchor to gather onto — the strip's last direct
+// window — and every window that is not a direct child of the strip, in tree
+// order. The anchor is nil only when there are no strays.
+func straysOutside(strip *sway.Node, leaves []*sway.Node) (*sway.Node, []*sway.Node) {
+	var anchor *sway.Node
+	var strays []*sway.Node
+	for _, leaf := range leaves {
+		if leaf.Parent == strip {
+			anchor = leaf // keep the last one: strays append after it
+			continue
+		}
+		strays = append(strays, leaf)
+	}
+	if len(strays) == 0 {
+		return nil, nil
+	}
+	if anchor == nil {
+		// Nothing sits directly in the strip yet (it is about to be created
+		// from this window's parent), so gather onto the first window.
+		anchor = strays[0]
+		strays = strays[1:]
+	}
+	return anchor, strays
+}
+
+// shapeSig renders the workspace's tiling shape as a string, so ensure can
+// tell "the repair landed" from "nothing moved". Ids and layouts only —
+// geometry is irrelevant to the strip invariant and changes constantly.
+func shapeSig(n *sway.Node) string {
+	var b strings.Builder
+	var walk func(node *sway.Node)
+	walk = func(node *sway.Node) {
+		fmt.Fprintf(&b, "%d/%s(", node.ID, node.Layout)
+		for _, c := range node.Nodes {
+			walk(c)
+		}
+		b.WriteByte(')')
+	}
+	walk(n)
+	return b.String()
+}
+
+func (t *Tabbed) runCmd(format string, args ...any) {
+	cmd := fmt.Sprintf(format, args...)
+	if err := t.conn.RunCommand(cmd); err != nil {
+		t.log().Warn("sway cmd failed", "cmd", cmd, "error", err)
+	}
 }
 
 // freshWorkspace re-fetches the tree and returns the named workspace node,
