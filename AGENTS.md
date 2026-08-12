@@ -12,7 +12,6 @@ Welcome to **tilekeeper** — a Sway/Wayland layout manager written in Go.
 - `internal/sway/` — Sway IPC client (binary protocol, event subscription)
 - `internal/workspace/` — Workspace Hub (event routing, nop command parsing, IPC handler)
 - `docs/` — Documentation (session-manager integration, design)
-- `trash/` — Deleted files (safety net)
 - `scratch/` — Local working notes (gitignored)
 
 ## Core Tools
@@ -24,7 +23,6 @@ Welcome to **tilekeeper** — a Sway/Wayland layout manager written in Go.
 ## Best Practices
 
 - **Verification**: Always run `just check` after changes. This runs format, lint, and tests.
-- **Safety**: **NEVER** use `rm`. Move files to `trash/` instead.
 - **Regression Testing**: Always keep tests used to fix bugs. Integrate them into the permanent suite.
 - **README-driven**: The README describes the desired behavior. Implementation should match the README.
 
