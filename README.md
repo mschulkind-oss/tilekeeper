@@ -9,7 +9,7 @@ Single-binary tiling layouts with per-workspace control, session manager integra
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26+-00ADD8.svg)](https://go.dev/)
 
-[Features](#features) · [Quick Start](#-quick-start) · [Layouts](#-layouts) · [Configuration](#-configuration) · [Commands](#-commands) · [Session Manager Integration](#-session-manager-integration)
+[Features](#features) · [Quick Start](#-quick-start) · [Layouts](#-layouts) · [Configuration](#-configuration) · [Commands](#-commands) · [Session Manager Integration](#-session-manager-integration) · [Origins](#origins)
 
 </div>
 
@@ -17,7 +17,7 @@ Single-binary tiling layouts with per-workspace control, session manager integra
 
 ## Why?
 
-Per-workspace tiling layouts are the right abstraction for Sway. tilekeeper takes that idea further:
+Per-workspace tiling layouts are the right abstraction for Sway. tilekeeper was heavily influenced by [layman](https://github.com/mschulkind/layman) (see [Origins](#origins)), but takes that idea further:
 
 - **Go** — single static binary, no runtime dependencies, instant startup
 - **Sway-native** — pure Wayland, no i3 compatibility baggage
@@ -479,6 +479,18 @@ generic `graphical-session.target` for both `After=` and `WantedBy=`.
 The unit carries no `Environment=` lines: sway pushes `SWAYSOCK` and friends into
 the systemd user environment, so a session-ordered unit inherits the live
 values.
+
+## Origins
+
+tilekeeper was heavily influenced by [mschulkind/layman](https://github.com/mschulkind/layman),
+my earlier layout manager written mostly in pre-LLM times. That project was itself
+a fork of the original [layman](https://github.com/frap129/layman) by Joe Maples (frap129).
+
+tilekeeper is a ground-up rewrite in Go that upgrades and modernizes the design:
+- **Zero-dependency binary** — a single static Go executable replaces Python, pip, and virtualenv setups.
+- **Sway-native architecture** — pure Wayland IPC designed specifically for Sway, without legacy i3 compatibility baggage.
+- **Session manager integration** — coordinates with session managers that manage projects, letting tilekeeper focus purely on arranging windows.
+- **Reliability and verification** — zero-overhead `nop` event routing, declarative layout specifications, and an in-memory Sway simulation harness with property-based fuzz testing to enforce layout invariants.
 
 ## Roadmap
 
