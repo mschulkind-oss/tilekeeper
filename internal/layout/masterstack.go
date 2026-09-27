@@ -328,6 +328,18 @@ func (m *MasterStack) WindowFocused(_ *sway.Node, window *sway.Node) error {
 	return nil
 }
 
+func (m *MasterStack) WindowMoved(ws *sway.Node, window *sway.Node) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ws == nil || len(m.windowIDs) < 2 {
+		return nil
+	}
+
+	m.syncWindowIDsFromTree(ws)
+	return nil
+}
+
 func (m *MasterStack) ArrangeAll(ws *sway.Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -376,6 +388,7 @@ func (m *MasterStack) Command(cmd string, ws *sway.Node) error {
 	// swap/move commands then target a vanished window — the
 	// "Failed to find con_id 92" warning we saw on ws7.
 	m.reconcileWindows(ws)
+	m.syncWindowIDsFromTree(ws)
 
 	m.log().Debug("command",
 		"command", cmd, "workspace", wsName(ws),
@@ -1597,6 +1610,99 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// ExpectedOrder derives the expected tracked window order from the workspace tree:
+// master windows first (indices 0..MasterCount-1), followed by stack windows in
+// top-to-bottom order (including substack windows in tab order).
+func (m *MasterStack) ExpectedOrder(ws *sway.Node) []int64 {
+	if ws == nil || len(m.windowIDs) < 2 {
+		return append([]int64(nil), m.windowIDs...)
+	}
+
+	if m.maximized {
+		return append([]int64(nil), m.windowIDs...)
+	}
+
+	masterCount := m.config.MasterCount
+	if masterCount < 1 || masterCount >= len(m.windowIDs) {
+		masterCount = 1
+	}
+
+	masterNode := ws.FindByID(m.windowIDs[0])
+	stackTopNode := ws.FindByID(m.windowIDs[masterCount])
+	if masterNode == nil || stackTopNode == nil || masterNode.Parent == nil || stackTopNode.Parent == nil {
+		return append([]int64(nil), m.windowIDs...)
+	}
+	if masterNode.Parent == stackTopNode.Parent {
+		return append([]int64(nil), m.windowIDs...)
+	}
+
+	// Ascend from stackTopNode to find the stack column container that is a sibling of masterNode.
+	curr := stackTopNode
+	for curr.Parent != nil && curr.Parent != masterNode.Parent {
+		curr = curr.Parent
+	}
+	if curr.Parent != masterNode.Parent {
+		return append([]int64(nil), m.windowIDs...)
+	}
+	stackCol := curr
+
+	var stackLeaves []int64
+	for _, l := range stackCol.Leaves() {
+		if l == nil || l.Type != "con" || l.IsFloating() || l.FullscreenMode == 1 {
+			continue
+		}
+		stackLeaves = append(stackLeaves, l.ID)
+	}
+
+	wantStackCount := len(m.windowIDs) - masterCount
+	if len(stackLeaves) != wantStackCount {
+		return append([]int64(nil), m.windowIDs...)
+	}
+
+	trackedStack := make(map[int64]bool, wantStackCount)
+	for _, id := range m.windowIDs[masterCount:] {
+		trackedStack[id] = true
+	}
+	for _, id := range stackLeaves {
+		if !trackedStack[id] {
+			return append([]int64(nil), m.windowIDs...)
+		}
+	}
+
+	result := make([]int64, 0, len(m.windowIDs))
+	result = append(result, m.windowIDs[:masterCount]...)
+	result = append(result, stackLeaves...)
+	return result
+}
+
+// syncWindowIDsFromTree re-orders m.windowIDs to match the visual tree order
+// when windows have been moved externally (e.g. mouse drag in the stack).
+func (m *MasterStack) syncWindowIDsFromTree(ws *sway.Node) {
+	if ws == nil || len(m.windowIDs) < 2 || m.maximized {
+		return
+	}
+
+	expected := m.ExpectedOrder(ws)
+	if len(expected) != len(m.windowIDs) {
+		return
+	}
+
+	changed := false
+	for i, id := range m.windowIDs {
+		if id != expected[i] {
+			changed = true
+			break
+		}
+	}
+
+	if changed {
+		m.log().Info("window-moved: reordered from tree",
+			"tracked_before", append([]int64(nil), m.windowIDs...),
+			"tracked_after", append([]int64(nil), expected...))
+		m.windowIDs = expected
+	}
 }
 
 // Verify interface compliance at compile time.

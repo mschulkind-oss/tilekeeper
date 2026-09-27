@@ -72,6 +72,13 @@ func (t *Tabbed) WindowFocused(_ *sway.Node, win *sway.Node) error {
 	return nil
 }
 
+func (t *Tabbed) WindowMoved(_ *sway.Node, win *sway.Node) error {
+	if win != nil {
+		t.log().Debug("window moved", "con_id", win.ID, "name", win.Name)
+	}
+	return nil
+}
+
 func (t *Tabbed) ArrangeAll(ws *sway.Node) error {
 	t.log().Debug("arrange-all", "workspace", wsName(ws))
 	return t.ensure(ws)

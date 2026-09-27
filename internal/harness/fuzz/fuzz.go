@@ -191,6 +191,7 @@ func RunWithTrace(cfg Config, trace *[]StepTrace) *Result {
 			checkMasterWidthHonored(hub, s, cfg.Workspaces, ev, i, res)
 			checkMasterStackSplit(hub, s, cfg.Workspaces, ev, i, res)
 			checkTabbedStripFlat(hub, s, cfg.Workspaces, ev, i, res)
+			checkTrackedOrderMatchesTree(hub, s, cfg.Workspaces, ev, i, res)
 			// Surface any Hub-logged Error after the step. These cover
 			// "command failed" / "unknown command" rejections from layout
 			// managers — i.e. a binding the user has bound that lm cannot
@@ -469,6 +470,108 @@ func checkTrackedMatchesLeaves(hub *workspace.Hub, s *sim.SimSwayClient, wsNames
 			Detail: fmt.Sprintf("workspace=%s tracked=%v leaves=%v missed=%v stale=%v",
 				name, mgr.WindowIDs(), leafIDs(wsNode), missed, stale),
 		})
+	}
+}
+
+// checkTrackedOrderMatchesTree asserts that on every MasterStack-managed
+// workspace with healthy tracking (no missed or stale leaves, master-stack
+// split intact), the manager's tracked WindowIDs list matches the visual order
+// in the tree: master windows first, followed by stack windows in top-to-bottom
+// order (including substack windows in tab order).
+//
+// Catches desync caused by manual mouse drags or unhandled moves.
+func checkTrackedOrderMatchesTree(hub *workspace.Hub, s *sim.SimSwayClient, wsNames []string, ev sway.Event, step int, res *Result) {
+	tree, _ := s.GetTree()
+	if tree == nil {
+		return
+	}
+	tree.SetParents()
+	for _, name := range wsNames {
+		mgr := hub.Manager(name)
+		if mgr == nil || mgr.WindowIDs() == nil {
+			continue
+		}
+		ms, ok := mgr.(*layout.MasterStack)
+		if !ok {
+			continue
+		}
+		ids := ms.WindowIDs()
+		if len(ids) < 2 {
+			continue
+		}
+		var wsNode *sway.Node
+		for _, ws := range tree.Workspaces() {
+			if ws.Name == name {
+				wsNode = ws
+				break
+			}
+		}
+		if wsNode == nil {
+			continue
+		}
+		// Skip if workspace has a fullscreen leaf (rebuild/reorder deferred)
+		hasFullscreen := false
+		for _, l := range wsNode.Leaves() {
+			if l.FullscreenMode == 1 {
+				hasFullscreen = true
+				break
+			}
+		}
+		if hasFullscreen {
+			continue
+		}
+		// Only check when set-tracking is healthy (tracked-matches-leaves owns set divergence)
+		wantSet := map[int64]bool{}
+		for _, l := range wsNode.Leaves() {
+			if l != nil && l.Type == "con" && !l.IsFloating() && l.FullscreenMode != 1 {
+				wantSet[l.ID] = true
+			}
+		}
+		if len(wantSet) != len(ids) {
+			continue
+		}
+		hasMismatch := false
+		for _, id := range ids {
+			if !wantSet[id] {
+				hasMismatch = true
+				break
+			}
+		}
+		if hasMismatch {
+			continue
+		}
+		// Skip degenerate lost-master shapes where master shares parent with stack window
+		master := wsNode.FindByID(ids[0])
+		if master == nil || master.Parent == nil {
+			continue
+		}
+		if !ms.Maximized() {
+			stackTop := wsNode.FindByID(ids[1])
+			if stackTop != nil && stackTop.Parent == master.Parent {
+				continue
+			}
+		}
+
+		expected := ms.ExpectedOrder(wsNode)
+		if len(expected) != len(ids) {
+			continue
+		}
+		diff := false
+		for i := range ids {
+			if ids[i] != expected[i] {
+				diff = true
+				break
+			}
+		}
+		if diff {
+			res.Violations = append(res.Violations, Violation{
+				Invariant: "tracked-order-matches-tree",
+				Step:      step,
+				Event:     ev,
+				Detail: fmt.Sprintf("workspace=%s tracked=%v want=%v",
+					name, ids, expected),
+			})
+		}
 	}
 }
 

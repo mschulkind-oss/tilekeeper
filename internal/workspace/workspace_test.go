@@ -683,6 +683,43 @@ func TestHandleWindowMoveEventToNowhere(t *testing.T) {
 	}
 }
 
+func TestHandleWindowMoveSameWorkspaceCallsWindowMoved(t *testing.T) {
+	hub, mock := newTestHub(config.DefaultConfig())
+
+	sway.ResetIDCounter()
+	tree := sway.CreateTree(
+		sway.WorkspaceSpec{Name: "1", WindowCount: 2},
+	)
+	mock.Tree = tree
+
+	mgr := newMockManager("MasterStack")
+	hub.SetManager("1", mgr)
+
+	ws1 := tree.Workspaces()[0]
+	win := ws1.Nodes[0]
+
+	// Prime hub tracking
+	hub.HandleEvent(sway.Event{
+		Type:      "window",
+		Change:    "new",
+		Container: &sway.Node{ID: win.ID, Type: "con"},
+	})
+
+	// Same-workspace move
+	hub.HandleEvent(sway.Event{
+		Type:      "window",
+		Change:    "move",
+		Container: &sway.Node{ID: win.ID, Type: "con"},
+	})
+
+	if mgr.movedCount != 1 {
+		t.Errorf("movedCount = %d, want 1", mgr.movedCount)
+	}
+	if mgr.removedCount != 0 {
+		t.Errorf("removedCount = %d, want 0", mgr.removedCount)
+	}
+}
+
 func TestFindWorkspaceViaTree(t *testing.T) {
 	hub, mock := newTestHub(config.DefaultConfig())
 
@@ -786,6 +823,7 @@ type mockManager struct {
 	addedCount   int
 	removedCount int
 	focusedCount int
+	movedCount   int
 	lastCommand  string
 	windowIDs    []int64
 }
@@ -809,6 +847,11 @@ func (m *mockManager) WindowRemoved(_ *sway.Node, _ *sway.Node) error {
 
 func (m *mockManager) WindowFocused(_ *sway.Node, _ *sway.Node) error {
 	m.focusedCount++
+	return nil
+}
+
+func (m *mockManager) WindowMoved(_ *sway.Node, _ *sway.Node) error {
+	m.movedCount++
 	return nil
 }
 

@@ -160,6 +160,11 @@ func (pt *ProjectTabs) WindowFocused(ws *sway.Node, window *sway.Node) error {
 	return nil
 }
 
+// WindowMoved handles window move — no-op for ProjectTabs.
+func (pt *ProjectTabs) WindowMoved(ws *sway.Node, window *sway.Node) error {
+	return nil
+}
+
 // Command handles user and IPC commands.
 func (pt *ProjectTabs) Command(cmd string, ws *sway.Node) error {
 	wsName := ws.Name

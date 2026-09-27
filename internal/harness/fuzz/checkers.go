@@ -32,6 +32,7 @@ func CheckStep(hub *workspace.Hub, s *sim.SimSwayClient, wsNames []string, ev sw
 	checkMasterStackSplit(hub, s, wsNames, ev, step, res)
 	checkMaximizedFoldIntact(hub, s, wsNames, ev, step, res)
 	checkTabbedStripFlat(hub, s, wsNames, ev, step, res)
+	checkTrackedOrderMatchesTree(hub, s, wsNames, ev, step, res)
 }
 
 // NewErrorSink returns a slog.Handler that records Error-level log lines,

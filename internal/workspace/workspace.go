@@ -498,9 +498,19 @@ func (h *Hub) handleWindowMove(seq int64, container *sway.Node) {
 	// reorder, including echoes of our own swap/move commands. The tracked
 	// manager already updated its state when it issued the command; treating
 	// the echo as remove+add would wipe windowIDs after each navigation.
+	//
+	// Forward to the manager via WindowMoved so external reorders (e.g. manual
+	// mouse drags in the stack or substack) update tracking to match the tree,
+	// while echoes of our own commands are safe no-ops.
 	if hadTracked && oldWSName == newWSName {
-		logging.Trace(h.logger, "window move (same workspace, ignored)",
+		logging.Trace(h.logger, "window move (same workspace)",
 			"seq", seq, "con_id", container.ID, "workspace", newWSName)
+		if mgr := h.Manager(newWSName); mgr != nil {
+			if err := mgr.WindowMoved(newWS, container); err != nil {
+				h.logger.Error("window moved failed",
+					"seq", seq, "con_id", container.ID, "workspace", newWSName, "error", err)
+			}
+		}
 		return
 	}
 

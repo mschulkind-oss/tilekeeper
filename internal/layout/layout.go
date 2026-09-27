@@ -31,6 +31,9 @@ type Manager interface {
 	// WindowFocused handles a window gaining focus on this workspace.
 	WindowFocused(ws *sway.Node, window *sway.Node) error
 
+	// WindowMoved handles a window moving within this workspace.
+	WindowMoved(ws *sway.Node, window *sway.Node) error
+
 	// Command handles a user command (e.g., "swap-master", "rotate cw").
 	Command(cmd string, ws *sway.Node) error
 
